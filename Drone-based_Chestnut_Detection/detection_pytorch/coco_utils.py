@@ -3,7 +3,7 @@ import os
 import torch
 import torch.utils.data
 import torchvision
-import transforms as T
+import detection_pytorch.transforms
 from pycocotools import mask as coco_mask
 from pycocotools.coco import COCO
 
@@ -222,7 +222,7 @@ def get_coco(root, image_set, transforms, mode="instances", use_v2=False, with_m
         t = [ConvertCocoPolysToMask()]
         if transforms is not None:
             t.append(transforms)
-        transforms = T.Compose(t)
+        transforms = detection_pytorch.transforms.Compose(t)
 
         dataset = CocoDetection(img_folder, ann_file, transforms=transforms)
 
