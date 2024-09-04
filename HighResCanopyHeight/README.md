@@ -27,11 +27,8 @@ Camille Couprie
 
 
 
-PyTorch implementation and pretrained models for High resolution Canopy Height Prediction inference. For details, see the paper: 
-**[Very high resolution canopy height maps from RGB imagery using self-supervised  vision transformer and convolutional decoder trained on Aerial Lidar](https://arxiv.org/abs/2304.07213)**.
-
-In collaboration with the Physical Modeling and Sustainability teams at Meta, and the World Resource Institute, we applied [DINOv2: Learning Robust Visual Features without Supervision](https://arxiv.org/abs/2304.07193) to the canopy height map (CHM) prediction problem. We used this technique to pretrain a backbone on about 18 millions satellite images around the globe. We then trained a CHM predictor on a modest sized training dataset covering a few thousand square kilometers of forests in the United States, with this backbone as feature extractor. 
-We demonstrate in our paper quantitatively and qualitatively the advantages of large-scale self-supervised learning, the versatility of obtained representations allowing generalization to different geographic regions and input imagery.
+PyTorch implementation and pre-trained models for High-resolution Canopy Height Prediction inference. For details, see the paper: 
+**[Very high-resolution canopy height maps from RGB imagery using self-supervised  vision transformer and convolutional decoder trained on Aerial Lidar](https://arxiv.org/abs/2304.07213)**.
 
 The maps obtained with this model are available at https://wri-datalab.earthengine.app/view/submeter-canopyheight. 
   
@@ -118,15 +115,11 @@ The folder "models" contains code borrowed from the Dinov2 team, we thank all co
 
 The inference using compressed models has not been tested using GPUs (CPU only).
 
-The backbone weights are the same for all SSL models. The backbone has been trained on  images filtered to contain mainly vegetation. 
+The backbone weights are the same for all SSL models. The backbone has been trained on images filtered to contain mainly vegetation. 
 
 ## License
 
 HighResCanopyHeight code and model weights are released under the Apache License 2.0. See [LICENSE](LICENSE) for additional details.
-
-## Contributing
-
-See [contributing](CONTRIBUTING.md) and the [code of conduct](CODE_OF_CONDUCT.md).
 
 ## Citing HighResCanopyHeight
 
