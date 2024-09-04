@@ -1,3 +1,5 @@
+# Cloned repo here: https://github.com/facebookresearch/HighResCanopyHeight and modified to add training.py and Meta_HRCH_Training_CustomDataset.ipynb
+
 # High Resolution Canopy Height Maps
 
 **[Meta AI Research, FAIR](https://ai.facebook.com/research/)**
