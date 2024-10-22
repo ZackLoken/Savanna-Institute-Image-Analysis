@@ -4,18 +4,23 @@ import os
 import requests
 import logging
 import multiprocessing
-from retry import retry
 import time
 
+# Ensure the out_dir argument is provided
+if len(sys.argv) < 4:
+    print("Usage: python download_meta_hrch_by_state.py <state_name:str> <num_workers:int> <out_dir:str>")
+    sys.exit(1)
 
-# set args for terminal processing (state name and number of workers)
+# Get the out_dir argument
 state_name = sys.argv[1]
 num_workers = int(sys.argv[2])
+out_dir = sys.argv[3]
 
+# Normalize the path
+out_dir = os.path.abspath(out_dir)
 
-# Initialize the Earth Engine module to use the high volume endpoint (use whenever making automated requests)
-ee.Initialize(url='https://earthengine-highvolume.googleapis.com', project='ee-zack')
-
+# Create the directory if it doesn't exist
+os.makedirs(out_dir, exist_ok=True)
 
 # Configure logging of process information
 logging.basicConfig(
@@ -24,6 +29,8 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
+# Initialize the Earth Engine module to use the high volume endpoint (use whenever making automated requests)
+ee.Initialize(url='https://earthengine-highvolume.googleapis.com', project='ee-zack')
 
 def check_and_split_county(county_geometry, max_dim, scale, max_request_size):
     """Check if the geometry exceeds GEE maximum dimensions and 
@@ -141,7 +148,7 @@ def process_sub_region(county_name, sub_region_idx, sub_region):
                 r.raise_for_status()
 
             # create a directory for the county
-            county_dir = f"C:/Users/exx/Desktop/CRP_Windbreak_ID/meta_chm_data/{state_name}" + '/' + str(county_name)
+            county_dir = f"{out_dir}/{state_name}" + '/' + str(county_name)
             os.makedirs(county_dir, exist_ok=True)
 
             # save the image to the county directory with filename: {county_name}_{sub_region_idx}_chm.tif
@@ -159,16 +166,23 @@ def process_sub_region(county_name, sub_region_idx, sub_region):
                 time.sleep(wait_time)
             else:
                 logging.error(f"HTTP error occurred: {e}")
+                failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()))
                 break
         except ee.EEException as e:
             logging.error(f"Error processing sub_region {sub_region_idx}: {e}")
+            failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()))
             break
         except Exception as e:
             logging.error(f"Unexpected error: {e}")
+            failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()))
             break
 
 
 if __name__ == '__main__':
+    # Global list to store failed sub-regions
+    manager = multiprocessing.Manager()
+    failed_sub_regions = manager.list()
+
     program_start_time = time.time()
 
     # store counties and subregions in a list
@@ -191,6 +205,13 @@ if __name__ == '__main__':
         pool.close()
         pool.join()
 
+    # Save failed sub-regions to a text file
+    failed_sub_regions_file = f"{out_dir}/{state_name}/failed_sub_regions.txt"
+    with open(failed_sub_regions_file, 'w') as f:
+        for item in failed_sub_regions:
+            f.write(f"{item}\n")
+
     program_end_time = time.time()
 
     print(f"Program finished in {program_end_time - program_start_time:.2f} seconds")
+    print(f"Failed sub-regions saved to {failed_sub_regions_file}")
