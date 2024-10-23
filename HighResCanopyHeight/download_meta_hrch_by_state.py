@@ -6,6 +6,7 @@ import logging
 import multiprocessing
 import time
 
+
 # Ensure the out_dir argument is provided
 if len(sys.argv) < 4:
     print("Usage: python download_meta_hrch_by_state.py <state_name:str> <num_workers:int> <out_dir:str>")
@@ -14,10 +15,7 @@ if len(sys.argv) < 4:
 # Get the out_dir argument
 state_name = sys.argv[1]
 num_workers = int(sys.argv[2])
-out_dir = sys.argv[3]
-
-# Normalize the path
-out_dir = os.path.abspath(out_dir)
+out_dir = os.path.abspath(sys.argv[3])
 
 # Create the directory if it doesn't exist
 os.makedirs(out_dir, exist_ok=True)
@@ -31,6 +29,7 @@ logging.basicConfig(
 
 # Initialize the Earth Engine module to use the high volume endpoint (use whenever making automated requests)
 ee.Initialize(url='https://earthengine-highvolume.googleapis.com', project='ee-zack')
+
 
 def check_and_split_county(county_geometry, max_dim, scale, max_request_size):
     """Check if the geometry exceeds GEE maximum dimensions and 
@@ -113,17 +112,17 @@ def getRequests(state_name:str):
         return []
 
 
-def getResults(index, counties_and_sub_regions):
+def getResults(index, counties_and_sub_regions, failed_sub_regions):
     """Prepare sub-region processing tasks for each county"""
     county_name, *sub_regions = counties_and_sub_regions[index]
 
     # Prepare arguments for parallel processing
-    tasks = [(county_name, sub_region_idx, sub_region_geojson) for sub_region_idx, sub_region_geojson in enumerate(sub_regions)]
+    tasks = [(county_name, sub_region_idx, sub_region_geojson, failed_sub_regions) for sub_region_idx, sub_region_geojson in enumerate(sub_regions)]
     
     return tasks
 
 
-def process_sub_region(county_name, sub_region_idx, sub_region):
+def process_sub_region(county_name, sub_region_idx, sub_region, failed_sub_regions):
     """Download the sub-region images for each county in the list of tuples"""
     # Convert GeoJSON to ee.Geometry.Rectangle
     sub_region = ee.Geometry.Rectangle(sub_region)
@@ -143,7 +142,7 @@ def process_sub_region(county_name, sub_region_idx, sub_region):
             })
 
             # Download the TIFF from URL
-            r = requests.get(url, stream=True)
+            r = requests.get(url, stream=True)  # Add timeout to requests
             if r.status_code != 200:
                 r.raise_for_status()
 
@@ -166,15 +165,19 @@ def process_sub_region(county_name, sub_region_idx, sub_region):
                 time.sleep(wait_time)
             else:
                 logging.error(f"HTTP error occurred: {e}")
-                failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()))
+                failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
                 break
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Request error occurred: {e}")
+            failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
+            break
         except ee.EEException as e:
             logging.error(f"Error processing sub_region {sub_region_idx}: {e}")
-            failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()))
+            failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
             break
         except Exception as e:
             logging.error(f"Unexpected error: {e}")
-            failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()))
+            failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
             break
 
 
@@ -191,19 +194,32 @@ if __name__ == '__main__':
     # Process each county one at a time
     for index in range(len(counties_and_sub_regions)):
         print(f'Beginning {counties_and_sub_regions[index][0]} County')
+        county_start_time = time.time()
 
         # Get tasks for the current county
-        tasks = getResults(index, counties_and_sub_regions)
+        tasks = getResults(index, counties_and_sub_regions, failed_sub_regions)
         
         # Create a multiprocessing pool with num_workers
         pool = multiprocessing.Pool(num_workers)
         
         # Use starmap to parallelize the processing of sub-regions for the current county
-        pool.starmap(process_sub_region, tasks)
+        results = pool.starmap_async(process_sub_region, tasks)
         
-        # Close and join the pool to ensure that all processes are completed before moving to the next county
-        pool.close()
-        pool.join()
+        # Monitor the processing time
+        while not results.ready():
+            if time.time() - county_start_time > 1200:  # 20 minutes
+                logging.warning(f"Processing county {counties_and_sub_regions[index][0]} timed out.")
+                pool.terminate()
+                pool.join()
+                # Add remaining tasks to failed_sub_regions
+                for task in tasks[results._index:]:
+                    failed_sub_regions.append((task[0], task[1], task[2]))
+                break
+            time.sleep(1)
+        
+        if results.ready():
+            pool.close()
+            pool.join()
 
     # Save failed sub-regions to a text file
     failed_sub_regions_file = f"{out_dir}/{state_name}/failed_sub_regions.txt"
