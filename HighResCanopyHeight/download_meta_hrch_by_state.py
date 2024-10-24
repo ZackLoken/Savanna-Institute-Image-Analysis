@@ -29,6 +29,7 @@ logging.basicConfig(
 
 # Initialize the Earth Engine module to use the high volume endpoint (use whenever making automated requests)
 ee.Initialize(url='https://earthengine-highvolume.googleapis.com', project='ee-zack')
+print(f"Initialized Earth Engine for processing {state_name} with {num_workers} workers to output directory: {out_dir}")
 
 
 def check_and_split_county(county_geometry, max_dim, scale, max_request_size):
@@ -76,7 +77,7 @@ def check_and_split_county(county_geometry, max_dim, scale, max_request_size):
         return [county_geometry]
 
 
-def getRequests(state_name:str):
+def getRequests(state_name: str, batch_size: int = 10, retries: int = 3, delay: int = 5):
     """Split counties in a state into subregions and return a list of 
     tuples with the county name followed by its subregions."""
     try:
@@ -89,23 +90,45 @@ def getRequests(state_name:str):
                 .first()
                 .get('STATEFP')
             )
-        )   
+        )
 
-        # Function to process each county name in the list
-        def process_county(county_name):
-            # Split the county into smaller subregions
-            sub_regions = check_and_split_county(
-                county_geometry = counties.filter(ee.Filter.eq('NAME', county_name)).first().geometry(), 
-                max_dim = 32768, 
-                scale = 1, 
-                max_request_size = 50331648
-            )
-            
-            # Create a tuple with the county name followed by its subregions
-            return (county_name, *sub_regions)
-        
-        # Use map to process each county and create the list of subregions
-        return list(map(process_county, counties.aggregate_array('NAME').getInfo()))
+        county_names = counties.aggregate_array('NAME').getInfo()
+        all_results = []
+
+        for i in range(0, len(county_names), batch_size):
+            batch = county_names[i:i + batch_size]
+            logging.info(f"Processing batch {i // batch_size + 1} of {len(county_names) // batch_size + 1}")
+
+            batch_results = []
+            for county_name in batch:
+                attempt = 0
+                while attempt < retries:
+                    try:
+                        logging.info(f"Loading county: {county_name}")
+                        # Split the county into smaller subregions
+                        sub_regions = check_and_split_county(
+                            county_geometry = counties.filter(ee.Filter.eq('NAME', county_name)).first().geometry(), 
+                            max_dim = 32768, 
+                            scale = 1, 
+                            max_request_size = 50331648
+                        )
+                        
+                        # Create a tuple with the county name followed by its subregions
+                        batch_results.append((county_name, *sub_regions))
+                        break
+                    except Exception as e:
+                        attempt += 1
+                        logging.error(f"Error processing county {county_name} on attempt {attempt}: {e}")
+                        if attempt < retries:
+                            time.sleep(delay * attempt)  # Exponential backoff
+                        else:
+                            logging.error(f"Failed to process county {county_name} after {retries} attempts.")
+                            continue
+
+            all_results.extend(batch_results)
+            time.sleep(1)  # Add a small delay to avoid rate limiting issues
+
+        return all_results
     
     except Exception as e:
         logging.error(f'Error processing state {state_name}: {e}')
@@ -190,9 +213,15 @@ if __name__ == '__main__':
 
     # store counties and subregions in a list
     counties_and_sub_regions = getRequests(state_name)
-    
+    print(f'Found {len(counties_and_sub_regions)} counties in {state_name}')
+     
     # Process each county one at a time
     for index in range(len(counties_and_sub_regions)):
+        county_folder = os.path.join(out_dir, state_name, counties_and_sub_regions[index][0])
+        if os.path.exists(county_folder): # handle folders that have already been completed
+            print(f'Skipping {counties_and_sub_regions[index][0]} County as it already exists.')
+            continue
+
         print(f'Beginning {counties_and_sub_regions[index][0]} County')
         county_start_time = time.time()
 
