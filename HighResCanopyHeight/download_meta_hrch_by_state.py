@@ -28,8 +28,7 @@ logging.basicConfig(
 )
 
 # Initialize the Earth Engine module to use the high volume endpoint (use whenever making automated requests)
-ee.Initialize(url='https://earthengine-highvolume.googleapis.com', project='ee-zack')
-print(f"Initialized Earth Engine for processing {state_name} with {num_workers} workers to output directory: {out_dir}")
+ee.Initialize(url='https://earthengine-highvolume.googleapis.com', project='ee-zack-loken')
 
 
 def check_and_split_county(county_geometry, max_dim, scale, max_request_size):
