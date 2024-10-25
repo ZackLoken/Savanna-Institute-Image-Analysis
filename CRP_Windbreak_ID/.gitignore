@@ -1,0 +1,8 @@
+
+/data
+/output_inference
+/output_training
+/models/__pycache__
+/__pycache__
+/saved_checkpoints
+/pl_modules/__pycache__
