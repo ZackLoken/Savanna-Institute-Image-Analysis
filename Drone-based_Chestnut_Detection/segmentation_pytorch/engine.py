@@ -8,12 +8,14 @@ import segmentation_pytorch.utils
 from segmentation_pytorch.coco_eval import CocoEvaluator
 from segmentation_pytorch.coco_utils import get_coco_api_from_dataset
 
-
 def train_one_epoch(model, optimizer, train_data_loader, val_data_loader, device, epoch, print_freq, scaler=None):
     model.train()
-    metric_logger = segmentation_pytorch.utils.MetricLogger(delimiter="  ")
-    metric_logger.add_meter('lr', segmentation_pytorch.utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
-    header = 'Epoch: [{}]'.format(epoch)
+    train_metric_logger = segmentation_pytorch.utils.MetricLogger(delimiter="  ")
+    train_metric_logger.add_meter('lr', segmentation_pytorch.utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    val_metric_logger = segmentation_pytorch.utils.MetricLogger(delimiter="  ")
+    val_metric_logger.add_meter('lr', segmentation_pytorch.utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    train_header = 'Epoch: [{}] Training'.format(epoch)
+    val_header = 'Epoch: [{}] Validation'.format(epoch)
 
     lr_scheduler = None
     if epoch == 0:
@@ -24,64 +26,69 @@ def train_one_epoch(model, optimizer, train_data_loader, val_data_loader, device
             optimizer, start_factor=warmup_factor, total_iters=warmup_iters
         )
 
-    for images, targets in metric_logger.log_every(train_data_loader, print_freq, header):
+    for images, targets in train_metric_logger.log_every(train_data_loader, print_freq, train_header):
         images = list(image.to(device) for image in images)
         targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
 
         with torch.amp.autocast('cuda', enabled=scaler is not None):
-            loss_dict = model(images, targets)
-            losses = sum(loss for loss in loss_dict.values())
+            train_loss_dict = model(images, targets)
+            train_losses = sum(loss for loss in train_loss_dict.values())
 
         # reduce losses over all GPUs for logging purposes
-        loss_dict_reduced = segmentation_pytorch.utils.reduce_dict(loss_dict)
-        losses_reduced = sum(loss for loss in loss_dict_reduced.values())
+        train_loss_dict_reduced = segmentation_pytorch.utils.reduce_dict(train_loss_dict)
+        train_losses_reduced = sum(loss for loss in train_loss_dict_reduced.values())
 
-        loss_value = losses_reduced.item()
+        train_loss_value = train_losses_reduced.item()
 
-        if not math.isfinite(loss_value):
-            print("Loss is {}, stopping training".format(loss_value))
-            print(loss_dict_reduced)
+        if not math.isfinite(train_loss_value):
+            print("Loss is {}, stopping training".format(train_loss_value))
+            print(train_loss_dict_reduced)
             sys.exit(1)
 
         optimizer.zero_grad()
         if scaler is not None:
-            scaler.scale(losses).backward()
+            scaler.scale(train_losses).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
-            losses.backward()
+            train_losses.backward()
             optimizer.step()
 
         if lr_scheduler is not None:
             lr_scheduler.step()
 
-        metric_logger.update(loss=losses_reduced, **loss_dict_reduced)
-        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        train_metric_logger.update(loss=train_losses_reduced, **train_loss_dict_reduced)
+        train_metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
-    # Validation loop
-    header = 'Validation:'
+    # calculate validation loss
+    print()
+    print("Calculating validation loss...")
+    print()
+
     with torch.no_grad():
-        for images, targets in metric_logger.log_every(val_data_loader, len(val_data_loader) // 2, header):
+        for images, targets in val_metric_logger.log_every(val_data_loader, len(val_data_loader)/2, val_header):
             images = list(image.to(device) for image in images)
             targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
 
+        
             with torch.amp.autocast('cuda', enabled=scaler is not None):
-                loss_dict = model(images, targets)
+                val_loss_dict = model(images, targets)
 
             # reduce losses over all GPUs for logging purposes
-            loss_dict_reduced = segmentation_pytorch.utils.reduce_dict(loss_dict)
-            losses_reduced = sum(loss for loss in loss_dict_reduced.values())
-            loss_value = losses_reduced.item()
+            val_loss_dict_reduced = segmentation_pytorch.utils.reduce_dict(val_loss_dict)
+            val_losses_reduced = sum(loss for loss in val_loss_dict_reduced.values())
 
-            if not math.isfinite(loss_value):
-                print("Loss is {}, stopping training".format(loss_value))
-                print(loss_dict_reduced)
+            val_loss_value = val_losses_reduced.item()
+
+            if not math.isfinite(val_loss_value):
+                print("Loss is {}, stopping training".format(val_loss_value))
+                print(val_loss_dict_reduced)
                 sys.exit(1)
 
-            metric_logger.update(loss=losses_reduced, **loss_dict_reduced)
-            metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+            val_metric_logger.update(loss=val_losses_reduced, **val_loss_dict_reduced)
+            val_metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
-    return metric_logger
+    return train_metric_logger, val_metric_logger
 
 
 def _get_iou_types(model):
