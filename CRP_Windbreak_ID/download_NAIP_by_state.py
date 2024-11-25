@@ -35,7 +35,7 @@ logging.basicConfig(
 
 def initialize_ee():
     """Initialize the Earth Engine module."""
-    ee.Initialize(url='https://earthengine-highvolume.googleapis.com', project='ee-zack-loken')
+    ee.Initialize(url='https://earthengine-highvolume.googleapis.com', project='ee-zack')
 
 initialize_ee()
 
