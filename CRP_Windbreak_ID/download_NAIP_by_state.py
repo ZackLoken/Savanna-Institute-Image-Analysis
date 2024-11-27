@@ -9,7 +9,7 @@ import time
 # Constants
 MAX_DIM = 32768
 SCALE = 0.6
-MAX_REQUEST_SIZE = 50331648
+MAX_REQUEST_SIZE = 50331648 / 2
 MAX_BANDS = 4
 BYTES_PER_PIXEL = 1
 
@@ -35,7 +35,7 @@ logging.basicConfig(
 
 def initialize_ee():
     """Initialize the Earth Engine module."""
-    ee.Initialize(url='https://earthengine-highvolume.googleapis.com', project='ee-zack-loken')
+    ee.Initialize(url='https://earthengine-highvolume.googleapis.com', project='ee-zack')
 
 initialize_ee()
 
@@ -45,19 +45,31 @@ def split_geometry(geometry, max_dim, scale, max_request_size):
     bbox = geometry.bounds().getInfo()['coordinates'][0]
     min_x, min_y = bbox[0]
     max_x, max_y = bbox[2]
-    
+
     width = max_x - min_x
     height = max_y - min_y
 
-    width_m = width * 111319.5
-    height_m = height * 111319.5
-    
+    width_m = width * 111320  # Approximate conversion factor for longitude
+    height_m = height * 110540  # Approximate conversion factor for latitude
+
     num_splits = 1
     while (width_m / num_splits) / scale > max_dim or (height_m / num_splits) / scale > max_dim:
         num_splits *= 2
 
-    while (width_m * height_m * 4) > max_request_size:
-        num_splits *= 4
+    # Calculate the size of each sub-region in pixels
+    sub_region_width_m = width_m / num_splits
+    sub_region_height_m = height_m / num_splits
+    sub_region_pixels = (sub_region_width_m / scale) * (sub_region_height_m / scale)  # Number of pixels
+
+    # Convert the size of each sub-region from pixels to bytes
+    sub_region_bytes = sub_region_pixels * 4  # 4 bytes per pixel (assuming 4 bands, 1 byte per band)
+
+    while sub_region_bytes > max_request_size:
+        num_splits *= 2
+        sub_region_width_m = width_m / num_splits
+        sub_region_height_m = height_m / num_splits
+        sub_region_pixels = (sub_region_width_m / scale) * (sub_region_height_m / scale)
+        sub_region_bytes = sub_region_pixels * 4
 
     if num_splits > 1:
         x_step = width / num_splits
@@ -76,7 +88,7 @@ def split_geometry(geometry, max_dim, scale, max_request_size):
         logging.info(f"Split into {len(sub_regions)} sub-regions.")
         return sub_regions
     else:
-        return [geometry]
+        return [[[min_x, min_y], [max_x, max_y]]]
 
 def getRequests(state_name: str, batch_size: int = 10, retries: int = 3, delay: int = 5):
     """Split counties in a state into subregions and return a list of 
@@ -146,8 +158,8 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
     sub_region_image = ee.ImageCollection('USDA/NAIP/DOQQ') \
                 .filterBounds(sub_region) \
                 .filter(ee.Filter.calendarRange(2018, 2024, 'year')) \
-                .sort('system:time_start', False) \
-                .first() \
+                .select(['R', 'G', 'B', 'N']) \
+                .mosaic() \
                 .clip(sub_region)
     
     max_retries = 5
@@ -158,7 +170,7 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
             url = sub_region_image.getDownloadURL({
                 'scale': SCALE,
                 'format': 'GEO_TIFF',
-                'bands': ['R', 'G', 'B', 'N']
+                'region': sub_region.getInfo()['coordinates']
             })
 
             r = requests.get(url, stream=True, timeout=60)
@@ -225,7 +237,7 @@ if __name__ == '__main__':
             tasks = getResults(index, counties_and_sub_regions, failed_sub_regions, state_name)
             
             # Create a multiprocessing pool with num_workers
-            pool = multiprocessing.Pool(num_workers, initializer=initialize_ee)
+            pool = multiprocessing.Pool(num_workers)
 
             # Use starmap to parallelize the processing of sub-regions for the current county
             results = pool.starmap_async(process_sub_region, tasks)
