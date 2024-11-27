@@ -196,24 +196,27 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
                 time.sleep(wait_time)
             else:
                 logging.error(f"HTTP error occurred: {e}")
-                failed_sub_regions.put((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
+                failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
                 break
+        except requests.exceptions.ConnectionError as e:
+            logging.error(f"Connection error occurred: {e}. Retrying...")
+            time.sleep(backoff_factor * (2 ** attempt))
         except requests.exceptions.RequestException as e:
             logging.error(f"Request error occurred: {e}")
-            failed_sub_regions.put((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
+            failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
             break
         except ee.EEException as e:
             logging.error(f"Error processing sub_region {sub_region_idx}: {e}")
-            failed_sub_regions.put((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
+            failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
             break
         except Exception as e:
             logging.error(f"Unexpected error in sub_region {sub_region_idx}: {e}")
-            failed_sub_regions.put((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
+            failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
             break
 
     else:
         logging.error(f"Failed to download sub-region {sub_region_idx} for county {county_name} after {max_retries} attempts")
-        failed_sub_regions.put((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
+        failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
 
 if __name__ == '__main__':
     manager = multiprocessing.Manager()
