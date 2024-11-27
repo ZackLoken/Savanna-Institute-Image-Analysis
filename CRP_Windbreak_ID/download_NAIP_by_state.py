@@ -226,12 +226,18 @@ if __name__ == '__main__':
         print(f'Found {len(counties_and_sub_regions)} counties in {state_name}')
         
         for index in range(len(counties_and_sub_regions)):
-            county_folder = os.path.join(out_dir, state_name, counties_and_sub_regions[index][0])
+            county_name = counties_and_sub_regions[index][0]
+            county_folder = os.path.join(out_dir, state_name, county_name)
+            
+            # Check if the county folder exists and contains the expected number of sub-region files
             if os.path.exists(county_folder):
-                print(f'Skipping {counties_and_sub_regions[index][0]} County as it already exists.')
-                continue
+                expected_files = len(counties_and_sub_regions[index]) - 1  # Subtract 1 for the county name
+                existing_files = len([name for name in os.listdir(county_folder) if name.endswith('.tif')])
+                if existing_files == expected_files:
+                    print(f'Skipping {county_name} County as it already exists and is complete.')
+                    continue
 
-            print(f'Beginning {counties_and_sub_regions[index][0]} County')
+            print(f'Beginning {county_name} County')
             county_start_time = time.time()
 
             tasks = getResults(index, counties_and_sub_regions, failed_sub_regions, state_name)
@@ -244,10 +250,10 @@ if __name__ == '__main__':
                 
             while not results.ready():
                 if time.time() - county_start_time > 1200:
-                    logging.warning(f"Processing county {counties_and_sub_regions[index][0]} timed out.")
+                    logging.warning(f"Processing county {county_name} timed out.")
                     pool.terminate()
                     pool.join()
-                    for task in tasks[results._index:]:
+                    for task in tasks:
                         failed_sub_regions.append((task[1], task[2], task[3]))
                     break
                 time.sleep(1)
@@ -255,8 +261,12 @@ if __name__ == '__main__':
             if results.ready():
                 pool.close()
                 pool.join()
+                # Check for any failed tasks
+                for task, result in zip(tasks, results.get()):
+                    if result is None:
+                        failed_sub_regions.append((task[1], task[2], task[3]))
 
-        failed_sub_regions_file = f"{os.path.join(out_dir, state_name)}/failed_sub_regions.txt"
+        failed_sub_regions_file = f"{os.path.join(out_dir, state_name)}/failed_sub_regions_{time.strftime('%Y%m%d_%H%M%S')}.txt"
         with open(failed_sub_regions_file, 'w') as f:
             for item in failed_sub_regions:
                 f.write(f"{item}\n")
