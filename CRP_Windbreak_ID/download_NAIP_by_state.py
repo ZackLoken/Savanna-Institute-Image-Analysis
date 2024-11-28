@@ -9,9 +9,40 @@ import time
 # Constants
 MAX_DIM = 32768
 SCALE = 0.6
-MAX_REQUEST_SIZE = 50331648 / 2
+MAX_REQUEST_SIZE = 50331648  # 48 MB
 MAX_BANDS = 4
 BYTES_PER_PIXEL = 1
+REQUEST_LIMIT = 5500  # Set the request limit to 5500 to avoid rate limiting
+
+# Initialize request counter and timestamp using a multiprocessing manager
+quota_manager = multiprocessing.Manager()
+request_counter = quota_manager.Value('i', 0)
+start_time = quota_manager.Value('d', time.time())
+
+def check_quota():
+    global request_counter, start_time
+
+    with request_counter.get_lock():
+        # Get the current time
+        current_time = time.time()
+
+        # Calculate the elapsed time since the start of the current minute
+        elapsed_time = current_time - start_time.value
+
+        # If a minute has passed, reset the counter and timestamp
+        if elapsed_time >= 60:
+            request_counter.value = 0
+            start_time.value = current_time
+
+        # Check if the request counter has reached the quota limit
+        if request_counter.value >= REQUEST_LIMIT:
+            # Calculate the remaining time until the next minute
+            remaining_time = 60 - elapsed_time
+            logging.warning(f"Quota limit reached. Pausing for {remaining_time:.2f} seconds...")
+            time.sleep(remaining_time)
+            # Reset the counter and timestamp after pausing
+            request_counter.value = 0
+            start_time.value = time.time()
 
 # Ensure the out_dir argument is provided
 if len(sys.argv) < 4:
@@ -42,7 +73,14 @@ initialize_ee()
 def split_geometry(geometry, max_dim, scale, max_request_size):
     """Check if the geometry exceeds GEE maximum dimensions and 
     split it into smaller subregions if needed."""
+    global request_counter
+
+    # Check quota before making a request
+    check_quota()
     bbox = geometry.bounds().getInfo()['coordinates'][0]
+    with request_counter.get_lock():
+        request_counter.value += 1
+
     min_x, min_y = bbox[0]
     max_x, max_y = bbox[2]
 
@@ -93,7 +131,11 @@ def split_geometry(geometry, max_dim, scale, max_request_size):
 def getRequests(state_name: str, batch_size: int = 10, retries: int = 3, delay: int = 5):
     """Split counties in a state into subregions and return a list of 
     tuples with the county name followed by its subregions."""
+    global request_counter
+
     try:
+        # Check quota before making a request
+        check_quota()
         counties = ee.FeatureCollection('TIGER/2018/Counties').filter(
             ee.Filter.eq(
                 'STATEFP',
@@ -103,8 +145,12 @@ def getRequests(state_name: str, batch_size: int = 10, retries: int = 3, delay: 
                 .get('STATEFP')
             )
         )
+        with request_counter.get_lock():
+            request_counter.value += 4
 
         county_names = counties.aggregate_array('NAME').getInfo()
+        with request_counter.get_lock():
+            request_counter.value += 1
         all_results = []
 
         for i in range(0, len(county_names), batch_size):
@@ -123,6 +169,8 @@ def getRequests(state_name: str, batch_size: int = 10, retries: int = 3, delay: 
                             scale = SCALE, 
                             max_request_size = MAX_REQUEST_SIZE
                         )
+                        with request_counter.get_lock():
+                            request_counter.value += 3
                         
                         batch_results.append((county_name, *sub_regions))
                         break
@@ -153,29 +201,51 @@ def getResults(index, counties_and_sub_regions, failed_sub_regions, state_name):
 
 def process_sub_region(state_name, county_name, sub_region_idx, sub_region, failed_sub_regions):
     """Download the sub-region images for each county in the list of tuples"""
+    global request_counter
+
+    # Check quota before making a request
+    check_quota()
     sub_region = ee.Geometry.Rectangle(sub_region)
+    with request_counter.get_lock():
+        request_counter.value += 1
 
     sub_region_image = ee.ImageCollection('USDA/NAIP/DOQQ') \
                 .filterBounds(sub_region) \
-                .filter(ee.Filter.calendarRange(2018, 2024, 'year')) \
+                .sort('system:time_start', False) \
                 .select(['R', 'G', 'B', 'N']) \
-                .mosaic() \
+                .first() \
                 .clip(sub_region)
+
+    if 'N' not in sub_region_image.bandNames().getInfo():
+        logging.info(f"Skipping sub-region {sub_region_idx} in county {county_name} as it contains no bands")
+        return
+    
+    with request_counter.get_lock():
+        request_counter.value += 7  # Increment the request counter by 7 to account for all preceding requests
     
     max_retries = 5
     backoff_factor = 1
 
     for attempt in range(max_retries):
         try:
+            # Check quota before making a request
+            check_quota()
+
             url = sub_region_image.getDownloadURL({
                 'scale': SCALE,
                 'format': 'GEO_TIFF',
                 'region': sub_region.getInfo()['coordinates']
             })
+            with request_counter.get_lock():
+                request_counter.value += 1
 
             r = requests.get(url, stream=True, timeout=60)
             if r.status_code != 200:
                 r.raise_for_status()
+
+            # Increment the request counter for the requests.get call
+            with request_counter.get_lock():
+                request_counter.value += 1
 
             county_dir = os.path.join(out_dir, state_name, str(county_name))
             os.makedirs(county_dir, exist_ok=True)
@@ -187,7 +257,7 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
                     f.write(chunk)
 
             logging.info(f"Saved {filename} to {county_dir}")
-            break
+            return  # Exit the function if successful
 
         except requests.exceptions.HTTPError as e:
             if r.status_code == 429:
@@ -196,22 +266,18 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
                 time.sleep(wait_time)
             else:
                 logging.error(f"HTTP error occurred: {e}")
-                failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
                 break
         except requests.exceptions.ConnectionError as e:
             logging.error(f"Connection error occurred: {e}. Retrying...")
             time.sleep(backoff_factor * (2 ** attempt))
         except requests.exceptions.RequestException as e:
             logging.error(f"Request error occurred: {e}")
-            failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
             break
         except ee.EEException as e:
             logging.error(f"Error processing sub_region {sub_region_idx}: {e}")
-            failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
             break
         except Exception as e:
             logging.error(f"Unexpected error in sub_region {sub_region_idx}: {e}")
-            failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
             break
 
     else:
@@ -219,62 +285,67 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
         failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
 
 if __name__ == '__main__':
-    manager = multiprocessing.Manager()
-    failed_sub_regions = manager.list()
+    failed_sub_regions_manager = multiprocessing.Manager()
+    failed_sub_regions = failed_sub_regions_manager.list()
 
     program_start_time = time.time()
 
-    for state_name in state_names:
-        counties_and_sub_regions = getRequests(state_name)
-        print(f'Found {len(counties_and_sub_regions)} counties in {state_name}')
-        
-        for index in range(len(counties_and_sub_regions)):
-            county_name = counties_and_sub_regions[index][0]
-            county_folder = os.path.join(out_dir, state_name, county_name)
+    try:
+        for state_name in state_names:
+            counties_and_sub_regions = getRequests(state_name)
+            print(f'Found {len(counties_and_sub_regions)} counties in {state_name}')
             
-            # Check if the county folder exists and contains the expected number of sub-region files
-            if os.path.exists(county_folder):
-                expected_files = len(counties_and_sub_regions[index]) - 1  # Subtract 1 for the county name
-                existing_files = len([name for name in os.listdir(county_folder) if name.endswith('.tif')])
-                if existing_files == expected_files:
-                    print(f'Skipping {county_name} County as it already exists and is complete.')
-                    continue
-
-            print(f'Beginning {county_name} County')
-            county_start_time = time.time()
-
-            tasks = getResults(index, counties_and_sub_regions, failed_sub_regions, state_name)
-            
-            # Create a multiprocessing pool with num_workers
-            pool = multiprocessing.Pool(num_workers)
-
-            # Use starmap to parallelize the processing of sub-regions for the current county
-            results = pool.starmap_async(process_sub_region, tasks)
+            for index in range(len(counties_and_sub_regions)):
+                county_name = counties_and_sub_regions[index][0]
+                county_folder = os.path.join(out_dir, state_name, county_name)
                 
-            while not results.ready():
-                if time.time() - county_start_time > 1200:
-                    logging.warning(f"Processing county {county_name} timed out.")
-                    pool.terminate()
-                    pool.join()
-                    for task in tasks:
-                        failed_sub_regions.append((task[1], task[2], task[3]))
-                    break
-                time.sleep(1)
-            
-            if results.ready():
-                pool.close()
-                pool.join()
-                # Check for any failed tasks
-                for task, result in zip(tasks, results.get()):
-                    if result is None:
-                        failed_sub_regions.append((task[1], task[2], task[3]))
+                # Check if the county folder exists and contains the expected number of sub-region files
+                if os.path.exists(county_folder):
+                    expected_files = len(counties_and_sub_regions[index]) - 1  # Subtract 1 for the county name
+                    existing_files = len([name for name in os.listdir(county_folder) if name.endswith('.tif')])
+                    if existing_files == expected_files:
+                        print(f'Skipping {county_name} County as it already exists and is complete.')
+                        continue
 
+                print(f'Beginning {county_name} County')
+                county_start_time = time.time()
+
+                tasks = getResults(index, counties_and_sub_regions, failed_sub_regions, state_name)
+                
+                # Create a multiprocessing pool with num_workers
+                pool = multiprocessing.Pool(num_workers)
+
+                # Use starmap to parallelize the processing of sub-regions for the current county
+                results = pool.starmap_async(process_sub_region, tasks)
+                    
+                while not results.ready():
+                    if time.time() - county_start_time > 1200:
+                        logging.warning(f"Processing county {county_name} timed out.")
+                        pool.terminate()
+                        pool.join()
+                        for task in tasks:
+                            failed_sub_regions.append((task[1], task[2], task[3]))
+                        break
+                    time.sleep(1)
+                
+                if results.ready():
+                    pool.close()
+                    pool.join()
+                    # Check for any failed tasks
+                    for task, result in zip(tasks, results.get()):
+                        if result is None:
+                            failed_sub_regions.append((task[1], task[2], task[3]))
+
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
+    finally:
+        # Save the failed sub-regions for the state to a text file
         failed_sub_regions_file = f"{os.path.join(out_dir, state_name)}/failed_sub_regions_{time.strftime('%Y%m%d_%H%M%S')}.txt"
         with open(failed_sub_regions_file, 'w') as f:
             for item in failed_sub_regions:
                 f.write(f"{item}\n")
 
-    program_end_time = time.time()
+        program_end_time = time.time()
 
-    print(f"Program finished in {program_end_time - program_start_time:.2f} seconds")
-    print(f"Failed sub-regions saved to {failed_sub_regions_file}")
+        print(f"Program finished in {program_end_time - program_start_time:.2f} seconds")
+        print(f"Failed sub-regions saved to {failed_sub_regions_file}")
