@@ -9,10 +9,22 @@ import time
 # Constants
 MAX_DIM = 32768
 SCALE = 0.6
-MAX_REQUEST_SIZE = 50331648  # 48 MB
+MAX_REQUEST_SIZE = 50331648 / 2 ## FIXME: This is a temporary fix to avoid exceeding the request size limit
 MAX_BANDS = 4
 BYTES_PER_PIXEL = 1
 REQUEST_LIMIT = 5500  # Set the request limit to 5500 to avoid rate limiting
+
+if len(sys.argv) < 4:
+    print("Usage: python download_naip_by_states.py <state_names:str> <num_workers:int> <out_dir:str>")
+    sys.exit(1)
+
+# Get the sys arguments
+state_names = sys.argv[1].split(',')
+num_workers = int(sys.argv[2])
+out_dir = os.path.abspath(sys.argv[3])
+
+# Create the directory if it doesn't exist
+os.makedirs(out_dir, exist_ok=True)
 
 # Configure logging of process information
 logging.basicConfig(
@@ -21,9 +33,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-def check_quota():
-    global request_counter, start_time, lock
-
+def check_quota(lock, start_time, request_counter):
     with lock:
         # Get the current time
         current_time = time.time()
@@ -46,19 +56,16 @@ def check_quota():
             request_counter.value = 0
             start_time.value = time.time()
 
-
 def initialize_ee():
     """Initialize the Earth Engine module."""
     ee.Initialize(url='https://earthengine-highvolume.googleapis.com', project='ee-zack')
 
-
-def split_geometry(geometry, max_dim, scale, max_request_size):
+def split_geometry(geometry, max_dim, scale, max_request_size, lock, start_time, request_counter):
     """Check if the geometry exceeds GEE maximum dimensions and 
     split it into smaller subregions if needed."""
-    global request_counter, lock
 
     # Check quota before making a request
-    check_quota()
+    check_quota(lock, start_time, request_counter)
     bbox = geometry.bounds().getInfo()['coordinates'][0]
     with lock:
         request_counter.value += 1
@@ -110,15 +117,13 @@ def split_geometry(geometry, max_dim, scale, max_request_size):
     else:
         return [[[min_x, min_y], [max_x, max_y]]]
 
-
-def getRequests(state_name: str, batch_size: int = 10, retries: int = 3, delay: int = 5):
+def getRequests(state_name: str, batch_size: int = 10, retries: int = 3, delay: int = 5, lock=None, start_time=None, request_counter=None):
     """Split counties in a state into subregions and return a list of 
     tuples with the county name followed by its subregions."""
-    global request_counter, lock
 
     try:
         # Check quota before making a request
-        check_quota()
+        check_quota(lock, start_time, request_counter)
         counties = ee.FeatureCollection('TIGER/2018/Counties').filter(
             ee.Filter.eq(
                 'STATEFP',
@@ -150,7 +155,10 @@ def getRequests(state_name: str, batch_size: int = 10, retries: int = 3, delay: 
                             geometry = counties.filter(ee.Filter.eq('NAME', county_name)).first().geometry(), 
                             max_dim = MAX_DIM, 
                             scale = SCALE, 
-                            max_request_size = MAX_REQUEST_SIZE
+                            max_request_size = MAX_REQUEST_SIZE,
+                            lock = lock,
+                            start_time = start_time,
+                            request_counter = request_counter
                         )
                         with lock:
                             request_counter.value += 3
@@ -174,7 +182,6 @@ def getRequests(state_name: str, batch_size: int = 10, retries: int = 3, delay: 
         logging.error(f'Error processing state {state_name}: {e}')
         return []
 
-
 def getResults(index, counties_and_sub_regions, failed_sub_regions, state_name):
     """Prepare sub-region processing tasks for each county"""
     county_name, *sub_regions = counties_and_sub_regions[index]
@@ -183,13 +190,11 @@ def getResults(index, counties_and_sub_regions, failed_sub_regions, state_name):
     
     return tasks
 
-
-def process_sub_region(state_name, county_name, sub_region_idx, sub_region, failed_sub_regions):
+def process_sub_region(state_name, county_name, sub_region_idx, sub_region, failed_sub_regions, lock, start_time, request_counter):
     """Download the sub-region images for each county in the list of tuples"""
-    global request_counter, lock
 
     # Check quota before making a request
-    check_quota()
+    check_quota(lock, start_time, request_counter)
     sub_region = ee.Geometry.Rectangle(sub_region)
     with lock:
         request_counter.value += 1
@@ -214,7 +219,7 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
     for attempt in range(max_retries):
         try:
             # Check quota before making a request
-            check_quota()
+            check_quota(lock, start_time, request_counter)
 
             url = sub_region_image.getDownloadURL({
                 'scale': SCALE,
@@ -269,26 +274,12 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
         logging.error(f"Failed to download sub-region {sub_region_idx} for county {county_name} after {max_retries} attempts")
         failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
 
-
 if __name__ == '__main__':
-    
-    if len(sys.argv) < 4:
-        print("Usage: python download_naip_by_states.py <state_names:str> <num_workers:int> <out_dir:str>")
-        sys.exit(1)
-
-    # Get CLI args
-    state_names = sys.argv[1].split(',')
-    num_workers = int(sys.argv[2])
-    out_dir = os.path.abspath(sys.argv[3])
-
-    # Create the directory if it doesn't exist
-    os.makedirs(out_dir, exist_ok=True)
-
     # Initialize request counter and timestamp using a multiprocessing manager
     quota_manager = multiprocessing.Manager()
     request_counter = quota_manager.Value('i', 0)
     start_time = quota_manager.Value('d', time.time())
-    lock = multiprocessing.Lock()
+    lock = quota_manager.Lock()  # Use Manager to create the lock
 
     # Initialize Earth Engine
     initialize_ee()
@@ -300,7 +291,7 @@ if __name__ == '__main__':
 
     try:
         for state_name in state_names:
-            counties_and_sub_regions = getRequests(state_name)
+            counties_and_sub_regions = getRequests(state_name, lock=lock, start_time=start_time, request_counter=request_counter)
             print(f'Found {len(counties_and_sub_regions)} counties in {state_name}')
             
             for index in range(len(counties_and_sub_regions)):
@@ -321,10 +312,10 @@ if __name__ == '__main__':
                 tasks = getResults(index, counties_and_sub_regions, failed_sub_regions, state_name)
                 
                 # Create a multiprocessing pool with num_workers
-                pool = multiprocessing.Pool(num_workers)
+                pool = multiprocessing.Pool(num_workers, initializer=initialize_ee)
 
                 # Use starmap to parallelize the processing of sub-regions for the current county
-                results = pool.starmap_async(process_sub_region, tasks)
+                results = pool.starmap_async(process_sub_region, [(task[0], task[1], task[2], task[3], task[4], lock, start_time, request_counter) for task in tasks])
                     
                 while not results.ready():
                     if time.time() - county_start_time > 1200:
@@ -343,6 +334,7 @@ if __name__ == '__main__':
                     for task, result in zip(tasks, results.get()):
                         if result is None:
                             failed_sub_regions.append((task[1], task[2], task[3]))
+
     except Exception as e:
         logging.error(f"An error occurred: {e}")
     finally:
