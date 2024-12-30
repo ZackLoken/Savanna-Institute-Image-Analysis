@@ -33,6 +33,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
+
 def check_quota(lock, start_time, request_counter):
     with lock:
         # Get the current time
@@ -56,9 +57,11 @@ def check_quota(lock, start_time, request_counter):
             request_counter.value = 0
             start_time.value = time.time()
 
+
 def initialize_ee():
     """Initialize the Earth Engine module."""
     ee.Initialize(url='https://earthengine-highvolume.googleapis.com', project='ee-zack')
+
 
 def split_geometry(geometry, max_dim, scale, max_request_size, lock, start_time, request_counter):
     """Check if the geometry exceeds GEE maximum dimensions and 
@@ -116,6 +119,7 @@ def split_geometry(geometry, max_dim, scale, max_request_size, lock, start_time,
         return sub_regions
     else:
         return [[[min_x, min_y], [max_x, max_y]]]
+
 
 def getRequests(state_name: str, batch_size: int = 10, retries: int = 3, delay: int = 5, lock=None, start_time=None, request_counter=None):
     """Split counties in a state into subregions and return a list of 
@@ -182,6 +186,7 @@ def getRequests(state_name: str, batch_size: int = 10, retries: int = 3, delay: 
         logging.error(f'Error processing state {state_name}: {e}')
         return []
 
+
 def getResults(index, counties_and_sub_regions, failed_sub_regions, state_name):
     """Prepare sub-region processing tasks for each county"""
     county_name, *sub_regions = counties_and_sub_regions[index]
@@ -189,6 +194,7 @@ def getResults(index, counties_and_sub_regions, failed_sub_regions, state_name):
     tasks = [(state_name, county_name, sub_region_idx, sub_region_geojson, failed_sub_regions) for sub_region_idx, sub_region_geojson in enumerate(sub_regions)]
     
     return tasks
+
 
 def process_sub_region(state_name, county_name, sub_region_idx, sub_region, failed_sub_regions, lock, start_time, request_counter):
     """Download the sub-region images for each county in the list of tuples"""
@@ -203,11 +209,18 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
                 .filterBounds(sub_region) \
                 .sort('system:time_start', False) \
                 .select(['R', 'G', 'B', 'N']) \
-                .first() \
-                .clip(sub_region)
+                .first()
+
+    if sub_region_image is None:
+        logging.info(f"No image found for sub-region {sub_region_idx} in county {county_name} -- skipping")
+        failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
+        return
+
+    sub_region_image = sub_region_image.clip(sub_region)
 
     if 'N' not in sub_region_image.bandNames().getInfo():
         logging.info(f"Skipping sub-region {sub_region_idx} in county {county_name} as it contains no bands")
+        failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
         return
 
     with lock:
@@ -273,6 +286,7 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
     else:
         logging.error(f"Failed to download sub-region {sub_region_idx} for county {county_name} after {max_retries} attempts")
         failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
+
 
 if __name__ == '__main__':
     # Initialize request counter and timestamp using a multiprocessing manager
