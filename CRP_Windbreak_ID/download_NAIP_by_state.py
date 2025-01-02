@@ -16,6 +16,7 @@ REQUEST_LIMIT = 5500  # Set the request limit to 5500 to avoid rate limiting
 
 if len(sys.argv) < 4:
     print("Usage: python download_naip_by_states.py <state_names:str> <num_workers:int> <out_dir:str>")
+    print('Example: python download_naip_by_states.py "Iowa,Illinois" 24 "/path/to/output"')
     sys.exit(1)
 
 # Get the sys arguments
@@ -211,17 +212,26 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
                 .select(['R', 'G', 'B', 'N']) \
                 .first()
 
+    # Improved check for valid image
     if sub_region_image is None:
-        logging.info(f"No image found for sub-region {sub_region_idx} in county {county_name} -- skipping")
-        failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
-        return
+        logging.info(f"Skipping sub-region {sub_region_idx} in county {county_name} -- no image found")
+        return False
+
+    try:
+        sub_region_image_info = sub_region_image.getInfo()
+    except Exception as e:
+        logging.error(f"Error retrieving info for sub-region {sub_region_idx} in county {county_name}: {e}")
+        return False
+
+    if sub_region_image_info is None:
+        logging.info(f"Skipping sub-region {sub_region_idx} in county {county_name} -- no valid info")
+        return False
 
     sub_region_image = sub_region_image.clip(sub_region)
 
     if 'N' not in sub_region_image.bandNames().getInfo():
-        logging.info(f"Skipping sub-region {sub_region_idx} in county {county_name} as it contains no bands")
-        failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
-        return
+        logging.info(f"Skipping sub-region {sub_region_idx} in county {county_name} -- it contains no bands")
+        return False
 
     with lock:
         request_counter.value += 7  # Increment the request counter by 7 to account for all preceding requests
@@ -260,7 +270,7 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
                     f.write(chunk)
 
             logging.info(f"Saved {filename} to {county_dir}")
-            return  # Exit the function if successful
+            return True  # Exit the function if successful
 
         except requests.exceptions.HTTPError as e:
             if r.status_code == 429:
@@ -283,9 +293,10 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
             logging.error(f"Unexpected error in sub_region {sub_region_idx}: {e}")
             break
 
-    else:
-        logging.error(f"Failed to download sub-region {sub_region_idx} for county {county_name} after {max_retries} attempts")
-        failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
+    # If we exit the loop without success, log the failure
+    logging.error(f"Failed to download sub-region {sub_region_idx} for county {county_name} after {max_retries} attempts")
+    failed_sub_regions.append((county_name, sub_region_idx, sub_region.getInfo()['coordinates']))
+    return False
 
 
 if __name__ == '__main__':
@@ -330,24 +341,31 @@ if __name__ == '__main__':
 
                 # Use starmap to parallelize the processing of sub-regions for the current county
                 results = pool.starmap_async(process_sub_region, [(task[0], task[1], task[2], task[3], task[4], lock, start_time, request_counter) for task in tasks])
+
+                completed_indices = set()
                     
                 while not results.ready():
-                    if time.time() - county_start_time > 1200:
+                    if time.time() - county_start_time > 3600: # 1 hour
                         logging.warning(f"Processing county {county_name} timed out.")
                         pool.terminate()
                         pool.join()
-                        for task in tasks:
-                            failed_sub_regions.append((task[1], task[2], task[3]))
+                        # Add remaining tasks to failed_sub_regions
+                        for i, task in enumerate(tasks):
+                            if i not in completed_indices:
+                                failed_sub_regions.append((task[1], task[2], task[3]))
                         break
                     time.sleep(1)
                 
                 if results.ready():
                     pool.close()
                     pool.join()
-                    # Check for any failed tasks
-                    for task, result in zip(tasks, results.get()):
-                        if result is None:
-                            failed_sub_regions.append((task[1], task[2], task[3]))
+                    # Track completed tasks
+                    for i, result in enumerate(results.get()):
+                        if result:
+                            completed_indices.add(i)
+                        else:
+                            failed_sub_regions.append((tasks[i][1], tasks[i][2], tasks[i][3]))
+                    print(f'Finished {county_name} County')
 
     except Exception as e:
         logging.error(f"An error occurred: {e}")
@@ -361,4 +379,4 @@ if __name__ == '__main__':
         program_end_time = time.time()
 
         print(f"Program finished in {program_end_time - program_start_time:.2f} seconds")
-        print(f"Failed sub-regions saved to {failed_sub_regions_file}")
+        print(f"{len(failed_sub_regions)} failed sub-regions saved to {failed_sub_regions_file}")
