@@ -8,7 +8,7 @@ import segmentation_pytorch.utils
 from segmentation_pytorch.coco_eval import CocoEvaluator
 from segmentation_pytorch.coco_utils import get_coco_api_from_dataset
 
-def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_freq, val_data_loader=None, scaler=None):
+def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_freq, accumulation_steps, val_data_loader=None):
     """
     Train model for one epoch on training dataset and retur training loss to logger. If validation dataset is provided,
     also return validation loss to logger.
@@ -33,19 +33,24 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
     lr_scheduler = None
     if epoch == 0:
         warmup_factor = 1.0 / 1000
-        warmup_iters = min(1000, len(train_data_loader) - 1)
+        warmup_iters = min(1000, len(train_data_loader) // accumulation_steps - 1)
 
-        lr_scheduler = torch.optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=warmup_factor, total_iters=warmup_iters
-        )
+        lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=warmup_factor, total_iters=warmup_iters)
 
-    for images, targets in train_metric_logger.log_every(train_data_loader, print_freq, train_header):
+    # Initialize gradient scaler for mixed precision training
+    scaler = torch.GradScaler(device)
+
+    for i, (images, targets) in enumerate(train_metric_logger.log_every(train_data_loader, print_freq, train_header)):
         images = list(image.to(device) for image in images)
         targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
 
-        with torch.amp.autocast('cuda', enabled=scaler is not None):
+        # Zero the gradients before the forward pass
+        if (i % accumulation_steps == 0):
+            optimizer.zero_grad()
+
+        with torch.autocast(device_type=device):
             train_loss_dict = model(images, targets)
-            train_losses = sum(loss for loss in train_loss_dict.values())
+            train_losses = sum(loss for loss in train_loss_dict.values()) / accumulation_steps
 
         # reduce losses over all GPUs for logging purposes
         train_loss_dict_reduced = segmentation_pytorch.utils.reduce_dict(train_loss_dict)
@@ -57,17 +62,20 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
             print(train_loss_dict_reduced)
             sys.exit(1)
 
-        optimizer.zero_grad()
         if scaler is not None:
             scaler.scale(train_losses).backward()
-            scaler.step(optimizer)
-            scaler.update()
         else:
             train_losses.backward()
-            optimizer.step()
 
-        if lr_scheduler is not None:
-            lr_scheduler.step()
+        if ((i + 1) % accumulation_steps == 0) or (i + 1 == len(train_data_loader)):
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+
+            if lr_scheduler is not None:
+                lr_scheduler.step()
 
         train_metric_logger.update(loss=train_losses_reduced, **train_loss_dict_reduced)
         train_metric_logger.update(lr=optimizer.param_groups[0]["lr"])
@@ -84,7 +92,7 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
                 targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
 
             
-                with torch.amp.autocast('cuda', enabled=scaler is not None):
+                with torch.autocast(device_type=device):
                     val_loss_dict = model(images, targets)
 
                 # reduce losses over all GPUs for logging purposes
@@ -101,7 +109,10 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
                 val_metric_logger.update(loss=val_losses_reduced, **val_loss_dict_reduced)
                 val_metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
-    return train_metric_logger, val_metric_logger if val_data_loader is not None else train_metric_logger
+    if val_data_loader is not None:
+        return train_metric_logger, val_metric_logger
+    else:
+        return train_metric_logger
 
 
 def _get_iou_types(model):
@@ -117,7 +128,7 @@ def _get_iou_types(model):
 
 
 @torch.inference_mode()
-def evaluate(model, val_data_loader, device, train_data_loader=None):
+def evaluate(model, val_data_loader, val_coco_ds, device, train_data_loader=None, train_coco_ds=None):
     """
     Evaluate model on validation dataset and return validation accuracy to logger. If training dataset is provided,
     also return training accuracy to logger.
@@ -134,16 +145,17 @@ def evaluate(model, val_data_loader, device, train_data_loader=None):
     torch.set_num_threads(1)
     cpu_device = torch.device("cpu")
     model.eval()
-    iou_types = _get_iou_types(model)
 
     val_metric_logger = segmentation_pytorch.utils.MetricLogger(delimiter="  ")
-    val_coco = get_coco_api_from_dataset(val_data_loader.dataset)
-    val_coco_evaluator = CocoEvaluator(val_coco, iou_types)
+    train_metric_logger = segmentation_pytorch.utils.MetricLogger(delimiter="  ") if train_data_loader is not None else None
 
+    iou_types = _get_iou_types(model)
+
+    train_coco_evaluator = None
     if train_data_loader is not None:
-        train_metric_logger = segmentation_pytorch.utils.MetricLogger(delimiter="  ")
-        train_coco = get_coco_api_from_dataset(train_data_loader.dataset)
-        train_coco_evaluator = CocoEvaluator(train_coco, iou_types)
+        if train_coco_ds is None:
+            train_coco_ds = get_coco_api_from_dataset(train_data_loader.dataset)
+        train_coco_evaluator = CocoEvaluator(train_coco_ds, iou_types)
 
         # calculate training accuracy
         for images, targets in train_metric_logger.log_every(train_data_loader, len(train_data_loader) // 3, 'Training Accuracy: '):
@@ -152,7 +164,8 @@ def evaluate(model, val_data_loader, device, train_data_loader=None):
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             model_time = time.time()
-            outputs = model(images)
+            with torch.autocast(device_type=device):
+                outputs = model(images)
 
             outputs = [{k: v.to(cpu_device) for k, v in t.items()} for t in outputs]
             model_time = time.time() - model_time
@@ -165,12 +178,15 @@ def evaluate(model, val_data_loader, device, train_data_loader=None):
 
         # gather the stats from all processes
         train_metric_logger.synchronize_between_processes()
-        print("Averaged stats:", train_metric_logger)
+        print("Training performance: ", train_metric_logger)
         train_coco_evaluator.synchronize_between_processes()
 
         # accumulate predictions from all images
         train_coco_evaluator.accumulate()
         train_coco_evaluator.summarize()
+
+
+    val_coco_evaluator = CocoEvaluator(val_coco_ds, iou_types)
 
     # calculate validation accuracy
     for images, targets in val_metric_logger.log_every(val_data_loader, len(val_data_loader) // 2, 'Validation Accuracy: '):
@@ -179,7 +195,8 @@ def evaluate(model, val_data_loader, device, train_data_loader=None):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         model_time = time.time()
-        outputs = model(images)
+        with torch.autocast(device_type=device):
+            outputs = model(images)
 
         outputs = [{k: v.to(cpu_device) for k, v in t.items()} for t in outputs]
         model_time = time.time() - model_time
@@ -192,7 +209,7 @@ def evaluate(model, val_data_loader, device, train_data_loader=None):
 
     # gather the stats from all processes
     val_metric_logger.synchronize_between_processes()
-    print("Averaged stats:", val_metric_logger)
+    print("Validation performance: ", val_metric_logger)
     val_coco_evaluator.synchronize_between_processes()
 
     # accumulate predictions from all images
@@ -201,4 +218,7 @@ def evaluate(model, val_data_loader, device, train_data_loader=None):
 
     torch.set_num_threads(n_threads)
 
-    return train_coco_evaluator, val_coco_evaluator if train_data_loader is not None else val_coco_evaluator
+    if train_data_loader is not None:
+        return train_coco_evaluator, val_coco_evaluator
+    else:
+        return val_coco_evaluator
