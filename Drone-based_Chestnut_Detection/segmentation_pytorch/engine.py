@@ -62,17 +62,11 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
             print(train_loss_dict_reduced)
             sys.exit(1)
 
-        if scaler is not None:
-            scaler.scale(train_losses).backward()
-        else:
-            train_losses.backward()
+        scaler.scale(train_losses).backward()
 
         if ((i + 1) % accumulation_steps == 0) or (i + 1 == len(train_data_loader)):
-            if scaler is not None:
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             if lr_scheduler is not None:
                 lr_scheduler.step()
@@ -184,7 +178,6 @@ def evaluate(model, val_data_loader, val_coco_ds, device, train_data_loader=None
         # accumulate predictions from all images
         train_coco_evaluator.accumulate()
         train_coco_evaluator.summarize()
-
 
     val_coco_evaluator = CocoEvaluator(val_coco_ds, iou_types)
 
