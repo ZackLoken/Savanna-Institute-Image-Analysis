@@ -81,7 +81,7 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
         val_header = 'Epoch: [{}] Validation'.format(epoch)
 
         with torch.no_grad():
-            for images, targets in val_metric_logger.log_every(val_data_loader, len(val_data_loader)/2, val_header):
+            for images, targets in val_metric_logger.log_every(val_data_loader, len(val_data_loader), val_header):
                 images = list(image.to(device) for image in images)
                 targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
 
@@ -152,7 +152,7 @@ def evaluate(model, val_data_loader, val_coco_ds, device, train_data_loader=None
         train_coco_evaluator = CocoEvaluator(train_coco_ds, iou_types)
 
         # calculate training accuracy
-        for images, targets in train_metric_logger.log_every(train_data_loader, len(train_data_loader) // 3, 'Training Accuracy: '):
+        for images, targets in train_metric_logger.log_every(train_data_loader, len(train_data_loader), 'Training Accuracy: '):
             images = list(img.to(device) for img in images)
 
             if torch.cuda.is_available():
@@ -182,7 +182,7 @@ def evaluate(model, val_data_loader, val_coco_ds, device, train_data_loader=None
     val_coco_evaluator = CocoEvaluator(val_coco_ds, iou_types)
 
     # calculate validation accuracy
-    for images, targets in val_metric_logger.log_every(val_data_loader, len(val_data_loader) // 2, 'Validation Accuracy: '):
+    for images, targets in val_metric_logger.log_every(val_data_loader, len(val_data_loader), 'Validation Accuracy: '):
         images = list(img.to(device) for img in images)
 
         if torch.cuda.is_available():
