@@ -6,6 +6,8 @@ import torchvision
 import segmentation_pytorch.transforms
 from pycocotools import mask as coco_mask
 from pycocotools.coco import COCO
+import pycocotools.mask as mask_util
+import numpy as np
 
 
 def convert_coco_poly_to_mask(segmentations, height, width):
@@ -171,16 +173,48 @@ def convert_to_coco_api(ds):
     return coco_ds
 
 
-def get_coco_api_from_dataset(dataset):
-    # FIXME: This is... awful?
-    for _ in range(10):
-        if isinstance(dataset, torchvision.datasets.CocoDetection):
-            break
-        if isinstance(dataset, torch.utils.data.Subset):
-            dataset = dataset.dataset
-    if isinstance(dataset, torchvision.datasets.CocoDetection):
-        return dataset.coco
-    return convert_to_coco_api(dataset)
+def get_coco_api_from_dataset(dataset):    
+    coco = COCO()
+    dataset_anns = []
+    imgs = []
+    ann_id = 1  # Initialize annotation ID counter
+    
+    for idx in range(len(dataset)):
+        # Get image and target
+        img, target = dataset[idx]
+        
+        # Add image info
+        imgs.append({
+            'id': int(target['image_id'].item() if isinstance(target['image_id'], torch.Tensor) else target['image_id']),
+            'height': img.shape[-2],
+            'width': img.shape[-1]
+        })
+        
+        # Add annotations
+        mask = target['masks']
+        if mask.shape[0] > 0:  # If we have masks
+            mask = mask.squeeze()
+            rle = mask_util.encode(np.array(mask.cpu().numpy(), order='F', dtype=np.uint8))
+            rle['counts'] = rle['counts'].decode('utf-8')
+            
+            dataset_anns.append({
+                'id': ann_id,  # Add unique annotation ID
+                'image_id': int(target['image_id'].item() if isinstance(target['image_id'], torch.Tensor) else target['image_id']),
+                'category_id': 1,
+                'segmentation': rle,
+                'area': float(mask.sum()),
+                'iscrowd': 0
+            })
+            ann_id += 1  # Increment annotation ID counter
+    
+    coco.dataset = {
+        'images': imgs,
+        'categories': [{'id': 1, 'name': 'chestnut_bur'}],
+        'annotations': dataset_anns
+    }
+    coco.createIndex()
+    
+    return coco
 
 
 class CocoDetection(torchvision.datasets.CocoDetection):
