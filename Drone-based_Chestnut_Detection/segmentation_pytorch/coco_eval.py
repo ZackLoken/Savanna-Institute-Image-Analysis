@@ -9,26 +9,37 @@ import segmentation_pytorch.utils
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval, Params
 
-class CustomParams(Params):
-    def setDetParams(self):
-        self.imgIds = []
-        self.catIds = []
-        self.iouThrs = np.linspace(.5, 0.95, int(np.round((0.95 - .5) / .05)) + 1, endpoint=True)
-        self.recThrs = np.linspace(.0, 1.00, int(np.round((1.00 - .0) / .01)) + 1, endpoint=True)
-        self.maxDets = [1, 10, 100]
-        self.areaRng = [[0 ** 2, 32 ** 2], [0 ** 2, 8 ** 2], [8 ** 2, 16 ** 2], [16 ** 2, 32 ** 2]]
-        self.areaRngLbl = ['all', 'small', 'medium', 'large']
-        self.useCats = 1
 
-    def __init__(self, iouType='segm'):
-        if iouType == 'segm' or iouType == 'bbox':
-            self.setDetParams()
-        elif iouType == 'keypoints':
-            self.setKpParams()
-        else:
-            raise Exception('iouType not supported')
-        self.iouType = iouType
-        self.useSegm = None
+class CustomParams(Params):
+    class CustomParams(Params):
+        def setDetParams(self):
+            self.imgIds = []
+            self.catIds = []  # Keep as empty list
+            # Use original IoU thresholds
+            self.iouThrs = np.linspace(.5, 0.95, int(np.round((0.95 - .5) / .05)) + 1, endpoint=True)
+            self.recThrs = np.linspace(.0, 1.00, int(np.round((1.00 - .0) / .01)) + 1, endpoint=True)
+            self.maxDets = [1]  # One detection per image for semantic segmentation
+            # Area ranges for 224x224 images
+            # Small: up to ~5% of image area
+            # Medium: ~5-15% of image area
+            # Large: >15% of image area
+            img_area = 224 * 224
+            self.areaRng = [
+                [0, img_area],             # all
+                [0, img_area * 0.05],      # small  (0-2,508 pixels)
+                [img_area * 0.05, img_area * 0.15],  # medium (2,508-7,526 pixels)
+                [img_area * 0.15, img_area]  # large  (>7,526 pixels)
+            ]
+            self.areaRngLbl = ['all', 'small', 'medium', 'large']
+            self.useCats = 1
+
+        def __init__(self, iouType='segm'):
+            if iouType == 'segm' or iouType == 'bbox':
+                self.setDetParams()
+            else:
+                raise Exception('Only segmentation evaluation supported')
+            self.iouType = iouType
+            self.useSegm = None
 
 
 class CustomCOCOeval(COCOeval):
@@ -60,7 +71,7 @@ class CustomCOCOeval(COCOeval):
         Compute and display summary metrics for evaluation results.
         Note this function can *only* be applied on the default parameter setting
         '''
-        def _summarize(ap=1, iouThr=None, areaRng='all', maxDets=100):
+        def _summarize(ap=1, iouThr=None, areaRng='all', maxDets=1):
             p = self.params
             iStr = ' {:<18} {} @[ IoU={:<9} | area={:>6s} | maxDets={:>3d} ] = {:0.3f}'
             titleStr = 'Average Precision' if ap == 1 else 'Average Recall'
@@ -92,49 +103,43 @@ class CustomCOCOeval(COCOeval):
             return mean_s
 
         def _summarizeDets():
-            stats = np.zeros((12,))
-            stats[0] = _summarize(1)
-            stats[1] = _summarize(1, iouThr=.5, maxDets=self.params.maxDets[2])
-            stats[2] = _summarize(1, iouThr=.75, maxDets=self.params.maxDets[2])
-            stats[3] = _summarize(1, areaRng='small', maxDets=self.params.maxDets[2])
-            stats[4] = _summarize(1, areaRng='medium', maxDets=self.params.maxDets[2])
-            stats[5] = _summarize(1, areaRng='large', maxDets=self.params.maxDets[2])
-            stats[6] = _summarize(0, maxDets=self.params.maxDets[0])
-            stats[7] = _summarize(0, maxDets=self.params.maxDets[1])
-            stats[8] = _summarize(0, maxDets=self.params.maxDets[2])
-            stats[9] = _summarize(0, areaRng='small', maxDets=self.params.maxDets[2])
-            stats[10] = _summarize(0, areaRng='medium', maxDets=self.params.maxDets[2])
-            stats[11] = _summarize(0, areaRng='large', maxDets=self.params.maxDets[2])
-            return stats
-
-        def _summarizeKps():
             stats = np.zeros((10,))
-            stats[0] = _summarize(1, maxDets=20)
-            stats[1] = _summarize(1, maxDets=20, iouThr=.5)
-            stats[2] = _summarize(1, maxDets=20, iouThr=.75)
-            stats[3] = _summarize(1, maxDets=20, areaRng='medium')
-            stats[4] = _summarize(1, maxDets=20, areaRng='large')
-            stats[5] = _summarize(0, maxDets=20)
-            stats[6] = _summarize(0, maxDets=20, iouThr=.5)
-            stats[7] = _summarize(0, maxDets=20, iouThr=.75)
-            stats[8] = _summarize(0, maxDets=20, areaRng='medium')
-            stats[9] = _summarize(0, maxDets=20, areaRng='large')
+            stats[0] = _summarize(1)                          # AP @ IoU=0.50:0.95
+            stats[1] = _summarize(1, iouThr=.5)              # AP @ IoU=0.50
+            stats[2] = _summarize(1, iouThr=.75)             # AP @ IoU=0.75
+            stats[3] = _summarize(1, areaRng='small')        # AP small
+            stats[4] = _summarize(1, areaRng='medium')       # AP medium
+            stats[5] = _summarize(1, areaRng='large')        # AP large
+            stats[6] = _summarize(0)                         # AR @ IoU=0.50:0.95
+            stats[7] = _summarize(0, areaRng='small')        # AR small
+            stats[8] = _summarize(0, areaRng='medium')      # AR medium
+            stats[9] = _summarize(0, areaRng='large')       # AR large
             return stats
 
         if not self.eval:
             raise Exception('Please run accumulate() first')
-        iouType = self.params.iouType
-        if iouType == 'segm' or iouType == 'bbox':
-            summarize = _summarizeDets
-        elif iouType == 'keypoints':
-            summarize = _summarizeKps
-        self.stats = summarize()
+        
+        if self.params.iouType != 'segm':
+            raise Exception('Only segmentation evaluation is supported')
+            
+        self.stats = _summarizeDets()
+        return self.stats
 
 
-class CocoEvaluator:
+class CustomCocoEvaluator:
+    """
+    COCO evaluator for semantic segmentation with single binary mask output.
+    Adapted from torchvision's COCOEvaluator for semantic segmentation tasks.
+    """
     def __init__(self, coco_gt, iou_types):
+        """
+        Initialize evaluator with ground truth COCO dataset and IoU types.
+        Args:
+            coco_gt: COCO dataset with ground truth annotations
+            iou_types: List of IoU types to evaluate (only 'segm' supported)
+        """
         if not isinstance(iou_types, (list, tuple)):
-            raise TypeError(f"This constructor expects iou_types of type list or tuple, instead  got {type(iou_types)}")
+            raise TypeError(f"This constructor expects iou_types of type list or tuple, instead got {type(iou_types)}")
         coco_gt = copy.deepcopy(coco_gt)
         self.coco_gt = coco_gt
 
@@ -152,6 +157,7 @@ class CocoEvaluator:
 
         for iou_type in self.iou_types:
             results = self.prepare(predictions, iou_type)
+            
             with redirect_stdout(io.StringIO()):
                 coco_dt = COCO.loadRes(self.coco_gt, results) if results else COCO()
             coco_eval = self.coco_eval[iou_type]
@@ -163,110 +169,66 @@ class CocoEvaluator:
             self.eval_imgs[iou_type].append(eval_imgs)
 
     def synchronize_between_processes(self):
+        """Synchronize evaluation state across processes for distributed evaluation."""
         for iou_type in self.iou_types:
             self.eval_imgs[iou_type] = np.concatenate(self.eval_imgs[iou_type], 2)
             create_common_coco_eval(self.coco_eval[iou_type], self.img_ids, self.eval_imgs[iou_type])
 
     def accumulate(self):
+        """Accumulate per-image evaluation results."""
         for coco_eval in self.coco_eval.values():
             coco_eval.accumulate()
 
     def summarize(self):
+        """Compute and display summary metrics for evaluation results."""
         for iou_type, coco_eval in self.coco_eval.items():
             print(f"IoU metric: {iou_type}")
             coco_eval.summarize()
 
     def prepare(self, predictions, iou_type):
-        if iou_type == "bbox":
-            return self.prepare_for_coco_detection(predictions)
+        """
+        Route predictions to appropriate preparation method.
+        Args:
+            predictions: Dict[image_id -> prediction outputs]
+            iou_type: Type of IoU to evaluate
+        Returns:
+            list[dict]: COCO results in the format of list[dict] 
+        """
         if iou_type == "segm":
             return self.prepare_for_coco_segmentation(predictions)
-        if iou_type == "keypoints":
-            return self.prepare_for_coco_keypoint(predictions)
         raise ValueError(f"Unknown iou type {iou_type}")
-
-    def prepare_for_coco_detection(self, predictions):
-        coco_results = []
-        for original_id, prediction in predictions.items():
-            if len(prediction) == 0:
-                continue
-
-            boxes = prediction["boxes"]
-            boxes = convert_to_xywh(boxes).tolist()
-            scores = prediction["scores"].tolist()
-            labels = prediction["labels"].tolist()
-
-            coco_results.extend(
-                [
-                    {
-                        "image_id": original_id,
-                        "category_id": labels[k],
-                        "bbox": box,
-                        "score": scores[k],
-                    }
-                    for k, box in enumerate(boxes)
-                ]
-            )
-        return coco_results
 
     def prepare_for_coco_segmentation(self, predictions):
         coco_results = []
         for original_id, prediction in predictions.items():
             if len(prediction) == 0:
                 continue
-
-            scores = prediction["scores"]
-            labels = prediction["labels"]
-            masks = prediction["masks"]
-
-            masks = masks > 0.5
-
-            scores = prediction["scores"].tolist()
-            labels = prediction["labels"].tolist()
-
-            rles = [
-                mask_util.encode(np.array(mask[0, :, :, np.newaxis], dtype=np.uint8, order="F"))[0] for mask in masks
-            ]
-            for rle in rles:
-                rle["counts"] = rle["counts"].decode("utf-8")
-
-            coco_results.extend(
-                [
-                    {
-                        "image_id": original_id,
-                        "category_id": labels[k],
-                        "segmentation": rle,
-                        "score": scores[k],
-                    }
-                    for k, rle in enumerate(rles)
-                ]
-            )
-        return coco_results
-
-    def prepare_for_coco_keypoint(self, predictions):
-        coco_results = []
-        for original_id, prediction in predictions.items():
-            if len(prediction) == 0:
+                
+            try:
+                mask = prediction["masks"][0]
+                score = prediction["scores"][0]
+                
+                binary_mask = (mask > 0.5).cpu().numpy().astype(np.uint8)
+                rle = mask_util.encode(np.asfortranarray(binary_mask[0]))
+                rle['counts'] = rle['counts'].decode('utf-8')
+                
+                # Ensure consistent ID type
+                if isinstance(original_id, torch.Tensor):
+                    image_id = original_id.item()
+                else:
+                    image_id = int(original_id)
+                
+                result = {
+                    "image_id": image_id,
+                    "category_id": 1,
+                    "segmentation": rle,
+                    "score": score.item()
+                }
+                coco_results.append(result)
+            except Exception as e:
+                print(f"Error processing prediction for image {original_id}: {e}")
                 continue
-
-            boxes = prediction["boxes"]
-            boxes = convert_to_xywh(boxes).tolist()
-            scores = prediction["scores"].tolist()
-            labels = prediction["labels"].tolist()
-            keypoints = prediction["keypoints"]
-            keypoints = keypoints.flatten(start_dim=1).tolist()
-
-            coco_results.extend(
-                [
-                    {
-                        "image_id": original_id,
-                        "category_id": labels[k],
-                        "keypoints": keypoint,
-                        "score": scores[k],
-                    }
-                    for k, keypoint in enumerate(keypoints)
-                ]
-            )
+                    
         return coco_results
 
 
