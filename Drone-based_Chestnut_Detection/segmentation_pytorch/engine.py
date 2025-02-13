@@ -29,9 +29,13 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
     model.train()
     train_metric_logger = segmentation_pytorch.utils.MetricLogger(delimiter="  ")
     train_metric_logger.add_meter('lr', segmentation_pytorch.utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
-    train_metric_logger.add_meter('loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
+    train_metric_logger.add_meter('total_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
     train_metric_logger.add_meter('bce_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
     train_metric_logger.add_meter('dice_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
+    train_metric_logger.add_meter('sup4_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
+    train_metric_logger.add_meter('sup3_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
+    train_metric_logger.add_meter('sup2_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
+    train_metric_logger.add_meter('sup1_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
     train_header = 'Epoch: [{}] Training'.format(epoch)
 
     lr_scheduler = None
@@ -48,17 +52,15 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
         images = list(image.to(device) for image in images)
         targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
 
-        # Zero the gradients before the forward pass
         if (i % accumulation_steps == 0):
             optimizer.zero_grad()
 
         with torch.autocast(device_type=device):
             train_loss_dict = model(images, targets)
-            train_losses = train_loss_dict['loss'] / accumulation_steps
+            train_losses = train_loss_dict['total_loss'] / accumulation_steps
 
-        # reduce losses over all GPUs for logging purposes
         train_loss_dict_reduced = segmentation_pytorch.utils.reduce_dict(train_loss_dict)
-        train_losses_reduced = train_loss_dict_reduced['loss']
+        train_losses_reduced = train_loss_dict_reduced['total_loss']
         train_loss_value = train_losses_reduced.item()
 
         if not math.isfinite(train_loss_value):
@@ -72,22 +74,32 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
             scaler.step(optimizer)
             scaler.update()
             
-            # Step the OneCycleLR scheduler after each batch
             if lr_scheduler is not None:
                 lr_scheduler.step()
 
-        train_metric_logger.update(loss=train_loss_dict_reduced['loss'].item(),
-                                   bce_loss=train_loss_dict_reduced['bce_loss'].item(),
-                                   dice_loss=train_loss_dict_reduced['dice_loss'].item())
+        # Update all loss metrics
+        train_metric_logger.update(
+            total_loss=train_loss_dict_reduced['total_loss'].item(),
+            bce_loss=train_loss_dict_reduced['bce_loss'].item(),
+            dice_loss=train_loss_dict_reduced['dice_loss'].item(),
+            sup4_loss=train_loss_dict_reduced['sup4_loss'].item(),
+            sup3_loss=train_loss_dict_reduced['sup3_loss'].item(),
+            sup2_loss=train_loss_dict_reduced['sup2_loss'].item(),
+            sup1_loss=train_loss_dict_reduced['sup1_loss'].item()
+        )
         train_metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
     # validation loop
     if val_data_loader is not None:
         val_metric_logger = segmentation_pytorch.utils.MetricLogger(delimiter="  ")
         val_metric_logger.add_meter('lr', segmentation_pytorch.utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
-        val_metric_logger.add_meter('loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
+        val_metric_logger.add_meter('total_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
         val_metric_logger.add_meter('bce_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
         val_metric_logger.add_meter('dice_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
+        val_metric_logger.add_meter('sup4_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
+        val_metric_logger.add_meter('sup3_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
+        val_metric_logger.add_meter('sup2_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
+        val_metric_logger.add_meter('sup1_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
         val_header = 'Epoch: [{}] Validation'.format(epoch)
 
         with torch.no_grad():
@@ -95,14 +107,11 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
                 images = list(image.to(device) for image in images)
                 targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
 
-            
                 with torch.autocast(device_type=device):
                     val_loss_dict = model(images, targets)
 
-                # reduce losses over all GPUs for logging purposes
                 val_loss_dict_reduced = segmentation_pytorch.utils.reduce_dict(val_loss_dict)
-                val_losses_reduced = sum(loss for loss in val_loss_dict_reduced.values())
-
+                val_losses_reduced = val_loss_dict_reduced['total_loss']
                 val_loss_value = val_losses_reduced.item()
 
                 if not math.isfinite(val_loss_value):
@@ -110,7 +119,16 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
                     print(val_loss_dict_reduced)
                     sys.exit(1)
 
-                val_metric_logger.update(**val_loss_dict_reduced)
+                # Update all validation loss metrics
+                val_metric_logger.update(
+                    total_loss=val_loss_dict_reduced['total_loss'].item(),
+                    bce_loss=val_loss_dict_reduced['bce_loss'].item(),
+                    dice_loss=val_loss_dict_reduced['dice_loss'].item(),
+                    sup4_loss=val_loss_dict_reduced['sup4_loss'].item(),
+                    sup3_loss=val_loss_dict_reduced['sup3_loss'].item(),
+                    sup2_loss=val_loss_dict_reduced['sup2_loss'].item(),
+                    sup1_loss=val_loss_dict_reduced['sup1_loss'].item()
+                )
                 val_metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
     if val_data_loader is not None:
@@ -135,7 +153,6 @@ def _get_iou_types(model):
     if isinstance(model_without_ddp, torchvision.models.detection.KeypointRCNN):
         iou_types.append("keypoints")
     return iou_types
-
 
 @torch.inference_mode()
 def evaluate(model, val_data_loader, val_coco_ds, device, train_data_loader=None, train_coco_ds=None):
