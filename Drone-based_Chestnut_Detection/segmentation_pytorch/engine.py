@@ -5,11 +5,12 @@ import time
 import torch
 import torchvision.models.detection.mask_rcnn
 import segmentation_pytorch.utils
-from segmentation_pytorch.coco_eval import CocoEvaluator
 from segmentation_pytorch.coco_utils import get_coco_api_from_dataset
-from segmentation_pytorch.coco_eval import CocoEvaluator
-import numpy as np
-from pycocotools import mask as mask_util
+from segmentation_pytorch.coco_eval import CustomCocoEvaluator
+
+##################################################################
+ #######             Semantic Segmentation             ########## 
+##################################################################
 
 def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_freq, accumulation_steps, val_data_loader=None):
     """
@@ -28,6 +29,9 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
     model.train()
     train_metric_logger = segmentation_pytorch.utils.MetricLogger(delimiter="  ")
     train_metric_logger.add_meter('lr', segmentation_pytorch.utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    train_metric_logger.add_meter('loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
+    train_metric_logger.add_meter('bce_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
+    train_metric_logger.add_meter('dice_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
     train_header = 'Epoch: [{}] Training'.format(epoch)
 
     lr_scheduler = None
@@ -50,11 +54,11 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
 
         with torch.autocast(device_type=device):
             train_loss_dict = model(images, targets)
-            train_losses = sum(loss for loss in train_loss_dict.values()) / accumulation_steps
+            train_losses = train_loss_dict['loss'] / accumulation_steps
 
         # reduce losses over all GPUs for logging purposes
         train_loss_dict_reduced = segmentation_pytorch.utils.reduce_dict(train_loss_dict)
-        train_losses_reduced = sum(loss for loss in train_loss_dict_reduced.values())
+        train_losses_reduced = train_loss_dict_reduced['loss']
         train_loss_value = train_losses_reduced.item()
 
         if not math.isfinite(train_loss_value):
@@ -72,13 +76,18 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
             if lr_scheduler is not None:
                 lr_scheduler.step()
 
-        train_metric_logger.update(**train_loss_dict_reduced)
+        train_metric_logger.update(loss=train_loss_dict_reduced['loss'].item(),
+                                   bce_loss=train_loss_dict_reduced['bce_loss'].item(),
+                                   dice_loss=train_loss_dict_reduced['dice_loss'].item())
         train_metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
     # validation loop
     if val_data_loader is not None:
         val_metric_logger = segmentation_pytorch.utils.MetricLogger(delimiter="  ")
         val_metric_logger.add_meter('lr', segmentation_pytorch.utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+        val_metric_logger.add_meter('loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
+        val_metric_logger.add_meter('bce_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
+        val_metric_logger.add_meter('dice_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
         val_header = 'Epoch: [{}] Validation'.format(epoch)
 
         with torch.no_grad():
@@ -115,10 +124,10 @@ def _get_iou_types(model):
     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
         model_without_ddp = model.module
         
-    # Check model type by name instead of import
+    # For semantic segmentation, we only need segmentation IoU
     if model_without_ddp.__class__.__name__ == 'SmallObjectUNet':
-        return ["bbox", "segm"]
-        
+        return ["segm"]
+    
     # Fallback to original type checking
     iou_types = ["bbox"]
     if isinstance(model_without_ddp, torchvision.models.detection.MaskRCNN):
@@ -126,36 +135,6 @@ def _get_iou_types(model):
     if isinstance(model_without_ddp, torchvision.models.detection.KeypointRCNN):
         iou_types.append("keypoints")
     return iou_types
-
-
-class CustomCocoEvaluator(CocoEvaluator):
-    def __init__(self, coco_gt, iou_types):
-        super().__init__(coco_gt, iou_types)
-    
-    def prepare_for_coco_segmentation(self, predictions):
-        coco_results = []
-        for original_id, prediction in predictions.items():
-            if len(prediction) == 0:
-                continue
-                
-            masks = prediction["masks"]
-            scores = prediction["scores"]
-            labels = prediction["labels"]
-            
-            for idx, (mask, score, label) in enumerate(zip(masks, scores, labels)):
-                binary_mask = (mask > 0.5).cpu().numpy().astype(np.uint8)
-                rle = mask_util.encode(np.asfortranarray(binary_mask[0]))
-                rle['counts'] = rle['counts'].decode('utf-8')
-                
-                result = {
-                    "image_id": original_id,
-                    "category_id": 1,  # Binary case
-                    "segmentation": rle,
-                    "score": score.item()
-                }
-                coco_results.append(result)
-                
-        return coco_results
 
 
 @torch.inference_mode()
