@@ -127,7 +127,7 @@ class CustomCOCOeval(COCOeval):
         return self.stats
 
 
-class CustomCocoEvaluator:
+class CustomCocoEvaluator(object):
     """
     COCO evaluator for semantic segmentation with single binary mask output.
     Adapted from torchvision's COCOEvaluator for semantic segmentation tasks.
@@ -204,33 +204,36 @@ class CustomCocoEvaluator:
         for original_id, prediction in predictions.items():
             if len(prediction) == 0:
                 continue
-                
+                    
             try:
-                mask = prediction["masks"][0]
-                score = prediction["scores"][0]
-                
-                binary_mask = (mask > 0.5).cpu().numpy().astype(np.uint8)
-                rle = mask_util.encode(np.asfortranarray(binary_mask[0]))
-                rle['counts'] = rle['counts'].decode('utf-8')
-                
-                # Ensure consistent ID type
-                if isinstance(original_id, torch.Tensor):
-                    image_id = original_id.item()
-                else:
-                    image_id = int(original_id)
-                
-                result = {
-                    "image_id": image_id,
-                    "category_id": 1,
-                    "segmentation": rle,
-                    "score": score.item()
-                }
-                coco_results.append(result)
+                masks = prediction["masks"]  # Should be [B, 1, H, W]
+                if len(masks.shape) == 3:  # If [B, H, W]
+                    masks = masks.unsqueeze(1)  # Add channel dim -> [B, 1, H, W]
+                    
+                # Process each mask in batch
+                for idx in range(masks.shape[0]):
+                    mask = masks[idx, 0]  # Take first channel -> [H, W]
+                    score = prediction["scores"][idx]
+                    
+                    binary_mask = (mask > 0.5).cpu().numpy().astype(np.uint8)
+                    rle = mask_util.encode(np.asfortranarray(binary_mask))
+                    if isinstance(rle, list):
+                        rle = rle[0]
+                    rle['counts'] = rle['counts'].decode('utf-8')
+                    
+                    result = {
+                        "image_id": int(original_id),
+                        "category_id": 1,
+                        "segmentation": rle,
+                        "score": float(score)
+                    }
+                    coco_results.append(result)
+                    
             except Exception as e:
                 print(f"Error processing prediction for image {original_id}: {e}")
                 continue
-                    
-        return coco_results
+                        
+            return coco_results
 
 
 def convert_to_xywh(boxes):
