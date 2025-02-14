@@ -123,98 +123,52 @@ def _coco_remove_images_without_annotations(dataset, cat_list=None):
 
 def convert_to_coco_api(ds):
     coco_ds = COCO()
-    # annotation IDs need to start at 1, not 0, see torchvision issue #1530
     ann_id = 1
     dataset = {"images": [], "categories": [], "annotations": []}
     categories = set()
+    
     for img_idx in range(len(ds)):
-        # find better way to get target
-        # targets = ds.get_annotations(img_idx)
         img, targets = ds[img_idx]
+        
         image_id = targets["image_id"]
         img_dict = {}
         img_dict["id"] = image_id
         img_dict["height"] = img.shape[-2]
         img_dict["width"] = img.shape[-1]
         dataset["images"].append(img_dict)
-        bboxes = targets["boxes"].clone()
-        bboxes[:, 2:] -= bboxes[:, :2]
-        bboxes = bboxes.tolist()
-        labels = targets["labels"].tolist()
-        areas = targets["area"].tolist()
-        iscrowd = targets["iscrowd"].tolist()
+        
+        # For semantic segmentation, create single annotation
         if "masks" in targets:
-            masks = targets["masks"]
-            # make masks Fortran contiguous for coco_mask
+            masks = targets["masks"]  # Shape [1, H, W] - already combined binary mask
+            # Make mask Fortran contiguous for coco_mask
             masks = masks.permute(0, 2, 1).contiguous().permute(0, 2, 1)
-        if "keypoints" in targets:
-            keypoints = targets["keypoints"]
-            keypoints = keypoints.reshape(keypoints.shape[0], -1).tolist()
-        num_objs = len(bboxes)
-        for i in range(num_objs):
+            
             ann = {}
             ann["image_id"] = image_id
-            ann["bbox"] = bboxes[i]
-            ann["category_id"] = labels[i]
-            categories.add(labels[i])
-            ann["area"] = areas[i]
-            ann["iscrowd"] = iscrowd[i]
+            ann["category_id"] = 1  # Binary class
+            categories.add(1)
+            ann["area"] = float(masks.sum())
+            ann["iscrowd"] = 0
             ann["id"] = ann_id
-            if "masks" in targets:
-                ann["segmentation"] = coco_mask.encode(masks[i].numpy())
-            if "keypoints" in targets:
-                ann["keypoints"] = keypoints[i]
-                ann["num_keypoints"] = sum(k != 0 for k in keypoints[i][2::3])
+            ann["segmentation"] = coco_mask.encode(masks[0].numpy())  # Use entire binary mask
             dataset["annotations"].append(ann)
             ann_id += 1
+            
     dataset["categories"] = [{"id": i} for i in sorted(categories)]
     coco_ds.dataset = dataset
     coco_ds.createIndex()
     return coco_ds
 
 
-def get_coco_api_from_dataset(dataset):    
-    coco = COCO()
-    dataset_anns = []
-    imgs = []
-    ann_id = 1  # Initialize annotation ID counter
-    
-    for idx in range(len(dataset)):
-        # Get image and target
-        img, target = dataset[idx]
-        
-        # Add image info
-        imgs.append({
-            'id': int(target['image_id'].item() if isinstance(target['image_id'], torch.Tensor) else target['image_id']),
-            'height': img.shape[-2],
-            'width': img.shape[-1]
-        })
-        
-        # Add annotations
-        mask = target['masks']
-        if mask.shape[0] > 0:  # If we have masks
-            mask = mask.squeeze()
-            rle = mask_util.encode(np.array(mask.cpu().numpy(), order='F', dtype=np.uint8))
-            rle['counts'] = rle['counts'].decode('utf-8')
-            
-            dataset_anns.append({
-                'id': ann_id,  # Add unique annotation ID
-                'image_id': int(target['image_id'].item() if isinstance(target['image_id'], torch.Tensor) else target['image_id']),
-                'category_id': 1,
-                'segmentation': rle,
-                'area': float(mask.sum()),
-                'iscrowd': 0
-            })
-            ann_id += 1  # Increment annotation ID counter
-    
-    coco.dataset = {
-        'images': imgs,
-        'categories': [{'id': 1, 'name': 'chestnut_bur'}],
-        'annotations': dataset_anns
-    }
-    coco.createIndex()
-    
-    return coco
+def get_coco_api_from_dataset(dataset):
+    for _ in range(10):
+        if isinstance(dataset, torchvision.datasets.CocoDetection):
+            break
+        if isinstance(dataset, torch.utils.data.Subset):
+            dataset = dataset.dataset
+    if isinstance(dataset, torchvision.datasets.CocoDetection):
+        return dataset.coco
+    return convert_to_coco_api(dataset)
 
 
 class CocoDetection(torchvision.datasets.CocoDetection):
