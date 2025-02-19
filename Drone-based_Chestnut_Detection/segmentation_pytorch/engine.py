@@ -206,6 +206,7 @@ def evaluate(model, val_data_loader, val_coco_ds, device, train_data_loader=None
         # gather the stats from all processes
         train_metric_logger.synchronize_between_processes()
         print("Training performance: ", train_metric_logger)
+        print()
         train_coco_evaluator.synchronize_between_processes()
 
         # accumulate predictions from all images
@@ -236,6 +237,7 @@ def evaluate(model, val_data_loader, val_coco_ds, device, train_data_loader=None
     # gather the stats from all processes
     val_metric_logger.synchronize_between_processes()
     print("Validation performance: ", val_metric_logger)
+    print()
     val_coco_evaluator.synchronize_between_processes()
 
     # accumulate predictions from all images
