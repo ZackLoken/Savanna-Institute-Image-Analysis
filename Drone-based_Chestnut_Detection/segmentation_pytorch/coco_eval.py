@@ -10,7 +10,24 @@ from segmentation_pytorch import utils
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval, Params
 
+# --- Helper metric functions ---
+def compute_binary_iou(pred_mask, gt_mask, smooth=1e-6):
+    """
+    Compute IoU between two binary masks.
+    Both pred_mask and gt_mask should be numpy arrays (dtype=uint8) with values {0,1}.
+    """
+    intersection = np.logical_and(pred_mask, gt_mask).sum()
+    union = np.logical_or(pred_mask, gt_mask).sum()
+    return (intersection + smooth) / (union + smooth)
 
+def compute_dice_score(pred_mask, gt_mask, smooth=1e-6):
+    """
+    Compute Dice score between two binary masks.
+    """
+    intersection = np.logical_and(pred_mask, gt_mask).sum()
+    return (2.0 * intersection + smooth) / (pred_mask.sum() + gt_mask.sum() + smooth)
+
+# --- CustomParams ---
 class CustomParams(Params):
     class CustomParams(Params):
         def setDetParams(self):
@@ -20,16 +37,13 @@ class CustomParams(Params):
             self.iouThrs = np.linspace(.5, 0.95, int(np.round((0.95 - .5) / .05)) + 1, endpoint=True)
             self.recThrs = np.linspace(.0, 1.00, int(np.round((1.00 - .0) / .01)) + 1, endpoint=True)
             self.maxDets = [1]  # One detection per image for semantic segmentation
-            # Area ranges for 224x224 images
-            # Small: up to ~5% of image area
-            # Medium: ~5-15% of image area
-            # Large: >15% of image area
+            # For 224x224 images
             img_area = 224 * 224
             self.areaRng = [
                 [0, img_area],             # all
-                [0, img_area * 0.05],      # small  (0-2,508 pixels)
-                [img_area * 0.05, img_area * 0.15],  # medium (2,508-7,526 pixels)
-                [img_area * 0.15, img_area]  # large  (>7,526 pixels)
+                [0, img_area * 0.05],      # small
+                [img_area * 0.05, img_area * 0.15],  # medium
+                [img_area * 0.15, img_area]  # large
             ]
             self.areaRngLbl = ['all', 'small', 'medium', 'large']
             self.useCats = 1
@@ -42,158 +56,166 @@ class CustomParams(Params):
             self.iouType = iouType
             self.useSegm = None
 
-
+# --- CustomCOCOeval ---
 class CustomCOCOeval(COCOeval):
     def __init__(self, cocoGt=None, cocoDt=None, iouType='segm'):
-        '''
-        Initialize CustomCOCOeval using coco APIs for gt and dt
-        :param cocoGt: coco object with ground truth annotations
-        :param cocoDt: coco object with detection results
-        :return: None
-        '''
+        """
+        Initialize CustomCOCOeval using COCO APIs for gt and dt.
+        """
         if not iouType:
             print('iouType not specified. use default iouType segm')
         self.cocoGt = cocoGt              # ground truth COCO API
         self.cocoDt = cocoDt              # detections COCO API
-        self.evalImgs = defaultdict(list)   # per-image per-category evaluation results [KxAxI] elements
+        self.evalImgs = defaultdict(list)   # per-image per-category evaluation results [KxAxI]
         self.eval = {}                  # accumulated evaluation results
         self._gts = defaultdict(list)       # gt for evaluation
         self._dts = defaultdict(list)       # dt for evaluation
         self.params = CustomParams(iouType=iouType) # use CustomParams
         self._paramsEval = {}               # parameters for evaluation
-        self.stats = []                     # result summarization
+        self.stats = []                     # will store [mean_iou, mean_dice]
         self.ious = {}                      # ious between all gts and dts
         if not cocoGt is None:
             self.params.imgIds = sorted(cocoGt.getImgIds())
             self.params.catIds = sorted(cocoGt.getCatIds())
 
     def summarize(self):
-        '''
-        Compute and display summary metrics for evaluation results.
-        Note this function can *only* be applied on the default parameter setting
-        '''
-        def _summarize(ap=1, iouThr=None, areaRng='all', maxDets=1):
-            p = self.params
-            iStr = ' {:<18} {} @[ IoU={:<9} | area={:>6s} | maxDets={:>3d} ] = {:0.3f}'
-            titleStr = 'Average Precision' if ap == 1 else 'Average Recall'
-            typeStr = '(AP)' if ap == 1 else '(AR)'
-            iouStr = '{:0.2f}:{:0.2f}'.format(p.iouThrs[0], p.iouThrs[-1]) if iouThr is None else '{:0.2f}'.format(iouThr)
-
-            aind = [i for i, aRng in enumerate(p.areaRngLbl) if aRng == areaRng]
-            mind = [i for i, mDet in enumerate(p.maxDets) if mDet == maxDets]
-            if ap == 1:
-                # dimension of precision: [TxRxKxAxM]
-                s = self.eval['precision']
-                # IoU
-                if iouThr is not None:
-                    t = np.where(iouThr == p.iouThrs)[0]
-                    s = s[t]
-                s = s[:, :, :, aind, mind]
-            else:
-                # dimension of recall: [TxKxAxM]
-                s = self.eval['recall']
-                if iouThr is not None:
-                    t = np.where(iouThr == p.iouThrs)[0]
-                    s = s[t]
-                s = s[:, :, aind, mind]
-            if len(s[s > -1]) == 0:
-                mean_s = -1
-            else:
-                mean_s = np.mean(s[s > -1])
-            print(iStr.format(titleStr, typeStr, iouStr, areaRng, maxDets, mean_s))
-            return mean_s
-
-        def _summarizeDets():
-            stats = np.zeros((10,))
-            stats[0] = _summarize(1)                          # AP @ IoU=0.50:0.95
-            stats[1] = _summarize(1, iouThr=.5)              # AP @ IoU=0.50
-            stats[2] = _summarize(1, iouThr=.75)             # AP @ IoU=0.75
-            stats[3] = _summarize(1, areaRng='small')        # AP small
-            stats[4] = _summarize(1, areaRng='medium')       # AP medium
-            stats[5] = _summarize(1, areaRng='large')        # AP large
-            stats[6] = _summarize(0)                         # AR @ IoU=0.50:0.95
-            stats[7] = _summarize(0, areaRng='small')        # AR small
-            stats[8] = _summarize(0, areaRng='medium')      # AR medium
-            stats[9] = _summarize(0, areaRng='large')       # AR large
-            return stats
-
-        if not self.eval:
-            raise Exception('Please run accumulate() first')
-        
-        if self.params.iouType != 'segm':
-            raise Exception('Only segmentation evaluation is supported')
-            
-        self.stats = _summarizeDets()
+        """
+        Compute and display binary segmentation performance metrics:
+        Mean IoU and Mean Dice score.
+        """
+        mean_iou, mean_dice = self.summarize_segmentation_metrics()
+        print(f"Mean IoU: {mean_iou:.3f}")
+        print(f"Mean Dice: {mean_dice:.3f}")
+        self.stats = [mean_iou, mean_dice]
         return self.stats
 
+    def summarize_segmentation_metrics(self):
+        """
+        For each image in the evaluation, decode the predicted segmentation
+        and the ground-truth mask, then compute the IoU and Dice score.
+        """
+        ious = []
+        dices = []
+        img_ids = self.params.imgIds
+        for img_id in img_ids:
+            # Retrieve ground truth annotations for this image.
+            gt_ann_ids = self.cocoGt.getAnnIds(imgIds=img_id, catIds=self.params.catIds, iscrowd=None)
+            gt_anns = self.cocoGt.loadAnns(gt_ann_ids)
+            gt_mask = np.zeros((224, 224), dtype=np.uint8)  # assuming images are 224x224 as set in params
+            for ann in gt_anns:
+                # Decode RLE segmentation and combine using a logical OR.
+                rle = ann['segmentation']
+                mask = mask_util.decode(rle)
+                gt_mask = np.logical_or(gt_mask, mask).astype(np.uint8)
+            # Retrieve detection results for this image.
+            dt_ann_ids = self.cocoDt.getAnnIds(imgIds=img_id, catIds=self.params.catIds)
+            dt_anns = self.cocoDt.loadAnns(dt_ann_ids)
+            if len(dt_anns) == 0:
+                continue  # No detection for this image.
+            # Use the first detection (assuming one per image).
+            dt_ann = dt_anns[0]
+            dt_rle = dt_ann['segmentation']
+            dt_mask = mask_util.decode(dt_rle)
+            dt_mask = (dt_mask > 0).astype(np.uint8)
+            # Compute metrics.
+            iou = compute_binary_iou(dt_mask, gt_mask)
+            dice = compute_dice_score(dt_mask, gt_mask)
+            ious.append(iou)
+            dices.append(dice)
+        mean_iou = np.mean(ious) if ious else 0
+        mean_dice = np.mean(dices) if dices else 0
+        return mean_iou, mean_dice
 
+    def accumulate(self):
+        # We leave this method mostly intact if needed by the COCO API, but note we no longer use AP/AR.
+        for imgId in self.params.imgIds:
+            for catId in self.params.catIds:
+                iou = self.computeIoU(imgId, catId)
+                self.ious[(imgId, catId)] = iou
+
+    def _prepare(self):
+        # Use COCOeval's original _prepare
+        super()._prepare()
+
+    def evaluate(self):
+        """
+        Run per-image evaluation for semantic segmentation. This will still call the COCOeval routines
+        to compute overlaps, but ultimately our new summarize() will report IoU and Dice.
+        """
+        p = self.params
+        p.iouType = 'segm'
+        p.imgIds = list(np.unique(p.imgIds))
+        p.catIds = [1]  # single class for binary segmentation
+        p.useCats = True
+        p.maxDets = [1]
+        self.params = p
+        self._prepare()
+        self.ious = {}
+        for imgId in p.imgIds:
+            for catId in p.catIds:
+                iou = self.computeIoU(imgId, catId)
+                self.ious[(imgId, catId)] = iou
+        evaluateImg = self.evaluateImg
+        maxDet = p.maxDets[-1]
+        evalImgs = [
+            evaluateImg(imgId, catId, areaRng, maxDet)
+            for catId in p.catIds
+            for areaRng in p.areaRng
+            for imgId in p.imgIds
+        ]
+        evalImgs = np.asarray(evalImgs).reshape(len(p.catIds), len(p.areaRng), len(p.imgIds))
+        self._paramsEval = copy.deepcopy(self.params)
+        return p.imgIds, evalImgs
+
+# --- CustomCocoEvaluator ---
 class CustomCocoEvaluator(object):
     """
     COCO evaluator for semantic segmentation with single binary mask output.
-    Adapted from torchvision's COCOEvaluator for semantic segmentation tasks.
+    Adapted from torchvision's COCOEvaluator.
     """
     def __init__(self, coco_gt, iou_types):
-        """
-        Initialize evaluator with ground truth COCO dataset and IoU types.
-        Args:
-            coco_gt: COCO dataset with ground truth annotations
-            iou_types: List of IoU types to evaluate (only 'segm' supported)
-        """
         if not isinstance(iou_types, (list, tuple)):
             raise TypeError(f"This constructor expects iou_types of type list or tuple, instead got {type(iou_types)}")
         coco_gt = copy.deepcopy(coco_gt)
         self.coco_gt = coco_gt
-
         self.iou_types = iou_types
         self.coco_eval = {}
         for iou_type in iou_types:
             self.coco_eval[iou_type] = CustomCOCOeval(coco_gt, iouType=iou_type)
-
         self.img_ids = []
         self.eval_imgs = {k: [] for k in iou_types}
 
     def update(self, predictions):
         img_ids = list(np.unique(list(predictions.keys())))
         self.img_ids.extend(img_ids)
-
         for iou_type in self.iou_types:
             results = self.prepare(predictions, iou_type)
-            
             with redirect_stdout(io.StringIO()):
                 coco_dt = COCO.loadRes(self.coco_gt, results) if results else COCO()
             coco_eval = self.coco_eval[iou_type]
-
             coco_eval.cocoDt = coco_dt
             coco_eval.params.imgIds = list(img_ids)
             img_ids, eval_imgs = evaluate(coco_eval)
-
             self.eval_imgs[iou_type].append(eval_imgs)
 
     def synchronize_between_processes(self):
-        """Synchronize evaluation state across processes for distributed evaluation."""
         for iou_type in self.iou_types:
             self.eval_imgs[iou_type] = np.concatenate(self.eval_imgs[iou_type], 2)
             create_common_coco_eval(self.coco_eval[iou_type], self.img_ids, self.eval_imgs[iou_type])
 
     def accumulate(self):
-        """Accumulate per-image evaluation results."""
         for coco_eval in self.coco_eval.values():
             coco_eval.accumulate()
 
     def summarize(self):
-        """Compute and display summary metrics for evaluation results."""
+        # For each IoU type, print the custom segmentation metrics (mean IoU and Dice).
         for iou_type, coco_eval in self.coco_eval.items():
-            print(f"IoU metric: {iou_type}")
+            print(f"Segmentation metrics for IoU type: {iou_type}")
             coco_eval.summarize()
 
     def prepare(self, predictions, iou_type):
         """
-        Route predictions to appropriate preparation method.
-        Args:
-            predictions: Dict[image_id -> prediction outputs]
-            iou_type: Type of IoU to evaluate
-        Returns:
-            list[dict]: COCO results in the format of list[dict] 
+        Route predictions to the appropriate preparation function.
         """
         if iou_type == "segm":
             return self.prepare_for_coco_segmentation(predictions)
@@ -204,23 +226,18 @@ class CustomCocoEvaluator(object):
         for original_id, prediction in predictions.items():
             if len(prediction) == 0:
                 continue
-                    
             try:
-                masks = prediction["masks"]  # Should be [B, 1, H, W]
-                if len(masks.shape) == 3:  # If [B, H, W]
-                    masks = masks.unsqueeze(1)  # Add channel dim -> [B, 1, H, W]
-                    
-                # Process each mask in batch
+                masks = prediction["masks"]  # Expected shape: [B, 1, H, W]
+                if len(masks.shape) == 3:
+                    masks = masks.unsqueeze(1)
                 for idx in range(masks.shape[0]):
-                    mask = masks[idx, 0]  # Take first channel -> [H, W]
+                    mask = masks[idx, 0]
                     score = prediction["scores"][idx]
-                    
                     binary_mask = (mask > 0.5).cpu().numpy().astype(np.uint8)
                     rle = mask_util.encode(np.asfortranarray(binary_mask))
                     if isinstance(rle, list):
                         rle = rle[0]
                     rle['counts'] = rle['counts'].decode('utf-8')
-                    
                     result = {
                         "image_id": int(original_id),
                         "category_id": 1,
@@ -228,50 +245,37 @@ class CustomCocoEvaluator(object):
                         "score": float(score)
                     }
                     coco_results.append(result)
-                    
             except Exception as e:
                 print(f"Error processing prediction for image {original_id}: {e}")
                 continue
-                        
-            return coco_results
-
+        return coco_results
 
 def convert_to_xywh(boxes):
     xmin, ymin, xmax, ymax = boxes.unbind(1)
     return torch.stack((xmin, ymin, xmax - xmin, ymax - ymin), dim=1)
 
-
 def merge(img_ids, eval_imgs):
     all_img_ids = utils.all_gather(img_ids)
     all_eval_imgs = utils.all_gather(eval_imgs)
-
     merged_img_ids = []
     for p in all_img_ids:
         merged_img_ids.extend(p)
-
     merged_eval_imgs = []
     for p in all_eval_imgs:
         merged_eval_imgs.append(p)
-
     merged_img_ids = np.array(merged_img_ids)
     merged_eval_imgs = np.concatenate(merged_eval_imgs, 2)
-
-    # keep only unique (and in sorted order) images
     merged_img_ids, idx = np.unique(merged_img_ids, return_index=True)
     merged_eval_imgs = merged_eval_imgs[..., idx]
-
     return merged_img_ids, merged_eval_imgs
-
 
 def create_common_coco_eval(coco_eval, img_ids, eval_imgs):
     img_ids, eval_imgs = merge(img_ids, eval_imgs)
     img_ids = list(img_ids)
     eval_imgs = list(eval_imgs.flatten())
-
     coco_eval.evalImgs = eval_imgs
     coco_eval.params.imgIds = img_ids
     coco_eval._paramsEval = copy.deepcopy(coco_eval.params)
-
 
 #################################################################
 # From pycocotools, just removed the prints and fixed
