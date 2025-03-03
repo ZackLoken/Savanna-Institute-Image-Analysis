@@ -10,7 +10,7 @@ import time
 # Constants
 MAX_DIM = 32768
 MAX_REQUEST_SIZE = 50331648
-MAX_BANDS = 4 # assuming 1 byte per band for a pixel
+MAX_BANDS = 4 
 REQUEST_LIMIT = 5500  # quota
 
 if len(sys.argv) < 4:
@@ -69,7 +69,8 @@ def split_geometry(geometry, max_dim, scale, max_request_size, max_bands, lock, 
 
     pixels_width = width_m / scale
     pixels_height = height_m / scale
-    while (pixels_width * pixels_height * max_bands / (num_splits ** 2)) > max_request_size:
+    bytes_per_pixel = max_bands * 1.2 # assuming 1 byte for 8 bit depth plus a bit of extra for metadata
+    while (pixels_width * pixels_height * bytes_per_pixel / (num_splits ** 2)) > max_request_size:
         num_splits *= 2
 
     if num_splits > 1:
@@ -198,7 +199,6 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
         projection_info = sub_region_image.projection().getInfo()
         # scale_x (index 0) is typically the resolution in meters
         image_scale = abs(projection_info['transform'][0])
-        logging.info(f"NAIP image for {county_name} sub-region {sub_region_idx} has resolution: {image_scale} meters")
         
     except Exception as e:
         logging.error(f"Error retrieving info for sub-region {sub_region_idx} in county {county_name}: {e}")
