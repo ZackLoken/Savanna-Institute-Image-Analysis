@@ -12,7 +12,8 @@ from segmentation_pytorch.coco_eval import CustomCocoEvaluator
  #######             Semantic Segmentation             ########## 
 ##################################################################
 
-def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_freq, accumulation_steps, val_data_loader=None):
+# def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_freq, accumulation_steps, val_data_loader=None):
+def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_freq, accumulation_steps, val_data_loader=None, step_epoch_counter=None):
     """
     Train model for one epoch on training dataset and return training loss to logger.
     
@@ -32,18 +33,17 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
     train_metric_logger.add_meter('total_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
     train_metric_logger.add_meter('bce_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
     train_metric_logger.add_meter('dice_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
-    train_metric_logger.add_meter('sup4_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
     train_metric_logger.add_meter('sup3_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
     train_metric_logger.add_meter('sup2_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
     train_metric_logger.add_meter('sup1_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
     train_header = 'Epoch: [{}] Training'.format(epoch)
 
     lr_scheduler = None
-    if epoch == 0:
-        warmup_factor = 1.0 / 1000
+    # Apply warmup at the start of each training step
+    if step_epoch_counter == 0:
+        warmup_factor = 1. / 1000
         warmup_iters = min(1000, len(train_data_loader) // accumulation_steps - 1)
-
-        lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=warmup_factor, total_iters=warmup_iters)
+        lr_scheduler = segmentation_pytorch.utils.warmup_lr_scheduler(optimizer, warmup_iters, warmup_factor)
     
     # Initialize gradient scaler for mixed precision training
     scaler = torch.GradScaler(device)
@@ -82,7 +82,6 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
             total_loss=train_loss_dict_reduced['total_loss'].item(),
             bce_loss=train_loss_dict_reduced['bce_loss'].item(),
             dice_loss=train_loss_dict_reduced['dice_loss'].item(),
-            sup4_loss=train_loss_dict_reduced['sup4_loss'].item(),
             sup3_loss=train_loss_dict_reduced['sup3_loss'].item(),
             sup2_loss=train_loss_dict_reduced['sup2_loss'].item(),
             sup1_loss=train_loss_dict_reduced['sup1_loss'].item()
@@ -96,7 +95,6 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
         val_metric_logger.add_meter('total_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
         val_metric_logger.add_meter('bce_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
         val_metric_logger.add_meter('dice_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
-        val_metric_logger.add_meter('sup4_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
         val_metric_logger.add_meter('sup3_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
         val_metric_logger.add_meter('sup2_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
         val_metric_logger.add_meter('sup1_loss', segmentation_pytorch.utils.SmoothedValue(window_size=20, fmt='{value:.4f}'))
@@ -124,7 +122,6 @@ def train_one_epoch(model, optimizer, train_data_loader, device, epoch, print_fr
                     total_loss=val_loss_dict_reduced['total_loss'].item(),
                     bce_loss=val_loss_dict_reduced['bce_loss'].item(),
                     dice_loss=val_loss_dict_reduced['dice_loss'].item(),
-                    sup4_loss=val_loss_dict_reduced['sup4_loss'].item(),
                     sup3_loss=val_loss_dict_reduced['sup3_loss'].item(),
                     sup2_loss=val_loss_dict_reduced['sup2_loss'].item(),
                     sup1_loss=val_loss_dict_reduced['sup1_loss'].item()
