@@ -14,8 +14,8 @@ MAX_BANDS = 1 # assuming 1 byte per band for a pixel
 REQUEST_LIMIT = 5500  # quota
 
 if len(sys.argv) < 4:
-    print("Usage: python download_naip_by_states.py <state_names:str> <num_workers:int> <out_dir:str>")
-    print('Example: python download_naip_by_states.py "Iowa,Illinois" 24 "/path/to/output"')
+    print("Usage: python download_meta_hrch_by_state.py <state_names:str> <num_workers:int> <out_dir:str>")
+    print('Example: python download_meta_hrch_by_state.py "Iowa,Illinois" 24 "/path/to/output"')
     sys.exit(1)
 
 # Get the sys arguments
