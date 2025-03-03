@@ -64,37 +64,48 @@ def split_geometry(geometry, max_dim, scale, max_request_size, max_bands, lock, 
     width = max_x - min_x
     height = max_y - min_y
 
-    # Simple conversion
-    width_m = width * 111319.5
+    # approximate conversion from degrees to meters in U.S.
+    lat_center = (min_y + max_y) / 2  # center latitude in degrees
+    width_m = width * 111319.5 * np.cos(np.radians(lat_center))
     height_m = height * 111319.5  
 
     num_splits = 1
     while (width_m / num_splits) / scale > max_dim or (height_m / num_splits) / scale > max_dim:
         num_splits *= 2
 
-    # Calculate without overlap first to determine splits
     pixels_width = width_m / scale
     pixels_height = height_m / scale
-    bytes_per_pixel = max_bands * 1.2 
+    bytes_per_pixel = max_bands * 1.2 # assuming 1 byte for 8 bit depth plus a bit of extra for metadata
     while (pixels_width * pixels_height * bytes_per_pixel / (num_splits ** 2)) > max_request_size:
         num_splits *= 2
 
     if num_splits > 1:
-        x_step = width / num_splits
+        # Calculate step sizes in degrees
         y_step = height / num_splits
         
-        # NO overlap - simple grid
+        # Create grid with proper latitude adjustment
         sub_regions = []
         for j in range(num_splits):
+            row_min_y = min_y + j * y_step
+            row_max_y = min_y + (j + 1) * y_step
+            
+            # Calculate x_step for this specific latitude band
+            row_center_lat = (row_min_y + row_max_y) / 2
+            # Adjust longitude step size based on this row's latitude
+            lon_correction = np.cos(np.radians(lat_center)) / np.cos(np.radians(row_center_lat))
+            x_step = (width / num_splits) * lon_correction
+            
             for i in range(num_splits):
+                # CRITICAL FIX: Actually use the corrected x_step value!
+                min_x_at_lat = min_x + i * x_step
                 sub_regions.append([
-                    min_x + i * x_step,
-                    min_y + j * y_step,
-                    min_x + (i + 1) * x_step,
-                    min_y + (j + 1) * y_step
+                    min_x_at_lat,
+                    row_min_y,
+                    min_x_at_lat + x_step, 
+                    row_max_y
                 ])
         
-        logging.info(f"Split into {len(sub_regions)} sub-regions.")
+        logging.info(f"Split into {len(sub_regions)} sub-regions with latitude correction.")
         return sub_regions
     else:
         return [[[min_x, min_y], [max_x, max_y]]]
