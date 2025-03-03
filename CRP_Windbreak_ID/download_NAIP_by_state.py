@@ -342,41 +342,34 @@ if __name__ == '__main__':
                 # Use starmap to parallelize the processing of sub-regions for the current county
                 results = pool.starmap_async(process_sub_region, [(task[0], task[1], task[2], task[3], task[4], lock, start_time, request_counter) for task in tasks])
 
-                completed_indices = set()
-                    
                 while not results.ready():
                     if time.time() - county_start_time > 3600: # 1 hour
                         logging.warning(f"Processing county {county_name} timed out.")
                         pool.terminate()
                         pool.join()
                         # Add remaining tasks to failed_sub_regions
-                        for i, task in enumerate(tasks):
-                            if i not in completed_indices:
-                                failed_sub_regions.append((task[1], task[2], task[3]))
+                        for task in tasks:
+                            failed_sub_regions.append((task[1], task[2], task[3]))
                         break
                     time.sleep(1)
                 
                 if results.ready():
                     pool.close()
                     pool.join()
-                    # Track completed tasks
+                    # Check results and append failed tasks to failed_sub_regions
                     for i, result in enumerate(results.get()):
-                        if result:
-                            completed_indices.add(i)
-                        else:
+                        if not result:
                             failed_sub_regions.append((tasks[i][1], tasks[i][2], tasks[i][3]))
                     print(f'Finished {county_name} County')
+
+            # Save the failed sub-regions for the state to a text file
+            failed_sub_regions_file = f"{os.path.join(out_dir, state_name)}/failed_sub_regions_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+            with open(failed_sub_regions_file, 'w') as f:
+                for item in failed_sub_regions:
+                    f.write(f"{item}\n")
 
     except Exception as e:
         logging.error(f"An error occurred: {e}")
     finally:
-        # Save the failed sub-regions for the state to a text file
-        failed_sub_regions_file = f"{os.path.join(out_dir, state_name)}/failed_sub_regions_{time.strftime('%Y%m%d_%H%M%S')}.txt"
-        with open(failed_sub_regions_file, 'w') as f:
-            for item in failed_sub_regions:
-                f.write(f"{item}\n")
-
         program_end_time = time.time()
-
         print(f"Program finished in {program_end_time - program_start_time:.2f} seconds")
-        print(f"{len(failed_sub_regions)} failed sub-regions saved to {failed_sub_regions_file}")
