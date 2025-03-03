@@ -1,6 +1,7 @@
 import ee
 import sys
 import os
+import numpy as np
 import requests
 import logging
 import multiprocessing
@@ -8,8 +9,8 @@ import time
 
 # Constants
 MAX_DIM = 32768
-SCALE = 1
 MAX_REQUEST_SIZE = 50331648
+MAX_BANDS = 1 # assuming 1 byte per band for a pixel
 REQUEST_LIMIT = 5500  # quota
 
 if len(sys.argv) < 4:
@@ -46,7 +47,7 @@ def check_quota(lock, start_time, request_counter):
 def initialize_ee():
     ee.Initialize(url='https://earthengine-highvolume.googleapis.com', project='ee-zack')
 
-def split_geometry(geometry, max_dim, scale, max_request_size, lock, start_time, request_counter):
+def split_geometry(geometry, max_dim, scale, max_request_size, max_bands, lock, start_time, request_counter):
     check_quota(lock, start_time, request_counter)
     bbox = geometry.bounds().getInfo()['coordinates'][0]
     with lock:
@@ -56,14 +57,17 @@ def split_geometry(geometry, max_dim, scale, max_request_size, lock, start_time,
     max_x, max_y = bbox[2]
     width = max_x - min_x
     height = max_y - min_y
-    width_m = width * 111319.5
-    height_m = height * 111319.5
+
+    # approximate conversion from degrees to meters in U.S.
+    lat_center = (min_y + max_y) / 2  # center latitude in degrees
+    width_m = width * 111319.5 * np.cos(np.radians(lat_center))
+    height_m = height * 111319.5  
 
     num_splits = 1
     while (width_m / num_splits) / scale > max_dim or (height_m / num_splits) / scale > max_dim:
         num_splits *= 2
 
-    while (width_m * height_m * 4 / (num_splits ** 2)) > max_request_size:
+    while (width_m * height_m * 4 / (num_splits ** 2)) * max_bands > max_request_size:
         num_splits *= 2
 
     if num_splits > 1:
@@ -102,8 +106,28 @@ def getRequests(state_name: str, batch_size: int = 10, retries: int = 3, delay: 
         county_names = counties.aggregate_array('NAME').getInfo()
         with lock:
             request_counter.value += 1
-        all_results = []
 
+        # Determine scale from first county
+        state_scale = 1  # Default scale if we can't determine it
+        if county_names:
+            first_county = counties.filter(ee.Filter.eq('NAME', county_names[0])).first()
+            try:
+                check_quota(lock, start_time, request_counter)
+                # Get a sample image from the first county
+                sample_image = ee.ImageCollection('projects/meta-forest-monitoring-okw37/assets/CanopyHeight') \
+                    .filterBounds(first_county.geometry()) \
+                    .first()
+                
+                if sample_image is not None:
+                    projection_info = sample_image.projection().getInfo()
+                    state_scale = abs(projection_info['transform'][0])
+                    logging.info(f"Determined scale for {state_name}: {state_scale} meters")
+                    with lock:
+                        request_counter.value += 3
+            except Exception as e:
+                logging.warning(f"Error determining scale for {state_name}: {e}. Using default scale.")
+
+        all_results = []
         for i in range(0, len(county_names), batch_size):
             batch = county_names[i:i + batch_size]
             logging.info(f"Processing batch {i // batch_size + 1} of {len(county_names) // batch_size + 1}")
@@ -116,8 +140,9 @@ def getRequests(state_name: str, batch_size: int = 10, retries: int = 3, delay: 
                         sub_regions = split_geometry(
                             geometry = counties.filter(ee.Filter.eq('NAME', county_name)).first().geometry(), 
                             max_dim = MAX_DIM, 
-                            scale = SCALE, 
+                            scale = state_scale,  # Use scale determined from first county
                             max_request_size = MAX_REQUEST_SIZE,
+                            max_bands = MAX_BANDS,
                             lock = lock,
                             start_time = start_time,
                             request_counter = request_counter
@@ -153,9 +178,8 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
         request_counter.value += 1
 
     sub_region_image = ee.ImageCollection('projects/meta-forest-monitoring-okw37/assets/CanopyHeight') \
-                       .filterBounds(sub_region) \
-                       .mosaic() \
-                       .clip(sub_region)
+                    .filterBounds(sub_region) \
+                    .first()
 
     if sub_region_image is None:
         logging.info(f"Skipping sub-region {sub_region_idx} in county {county_name} -- no image found")
@@ -163,6 +187,13 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
 
     try:
         sub_region_image_info = sub_region_image.getInfo()
+        
+        # Get the projection information and extract the scale (resolution)
+        projection_info = sub_region_image.projection().getInfo()
+        # scale_x (index 0) is typically the resolution in meters
+        image_scale = abs(projection_info['transform'][0])
+        logging.info(f"CHM image for {county_name} sub-region {sub_region_idx} has resolution: {image_scale} meters")
+        
     except Exception as e:
         logging.error(f"Error retrieving info for sub-region {sub_region_idx} in county {county_name}: {e}")
         return False
@@ -171,10 +202,10 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
         logging.info(f"Skipping sub-region {sub_region_idx} in county {county_name} -- no valid info")
         return False
 
-    sub_region_image = sub_region_image.clip(sub_region)
+    sub_region_image = sub_region_image.clip(sub_region) 
 
     with lock:
-        request_counter.value += 5
+        request_counter.value += 5  # Increment by 6 to account for preceeding requests to gee
 
     max_retries = 5
     backoff_factor = 1
@@ -182,7 +213,7 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
         try:
             check_quota(lock, start_time, request_counter)
             url = sub_region_image.getDownloadURL({
-                'scale': SCALE,
+                'scale': image_scale,  # Use the dynamically determined scale
                 'format': 'GEO_TIFF',
             })
             with lock:
@@ -194,7 +225,7 @@ def process_sub_region(state_name, county_name, sub_region_idx, sub_region, fail
                 request_counter.value += 1
             county_dir = os.path.join(out_dir, state_name, str(county_name))
             os.makedirs(county_dir, exist_ok=True)
-            filename = f"{county_name}_{sub_region_idx}_naip.tif"
+            filename = f"{county_name}_{sub_region_idx}_chm.tif"
             filepath = os.path.join(county_dir, filename)
             with open(filepath, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
