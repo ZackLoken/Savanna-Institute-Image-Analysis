@@ -67,7 +67,9 @@ def split_geometry(geometry, max_dim, scale, max_request_size, max_bands, lock, 
     while (width_m / num_splits) / scale > max_dim or (height_m / num_splits) / scale > max_dim:
         num_splits *= 2
 
-    while (width_m * height_m * 4 / (num_splits ** 2)) * max_bands > max_request_size:
+    pixels_width = width_m / scale
+    pixels_height = height_m / scale
+    while (pixels_width * pixels_height * max_bands / (num_splits ** 2)) > max_request_size:
         num_splits *= 2
 
     if num_splits > 1:
