@@ -45,7 +45,13 @@ def check_quota(lock, start_time, request_counter):
             start_time.value = time.time()
 
 def initialize_ee():
-    ee.Initialize(url='https://earthengine-highvolume.googleapis.com', project='ee-zack')
+    try:
+        ee.Authenticate()
+        ee.Initialize(url='https://earthengine-highvolume.googleapis.com', project='ee-zack')
+        logging.info("Earth Engine initialized successfully")
+    except Exception as e:
+        logging.error(f"Earth Engine initialization failed: {e}")
+        raise e  # Re-raise to ensure the error is handled properly
 
 def split_geometry(geometry, max_dim, scale, max_request_size, max_bands, lock, start_time, request_counter):
     check_quota(lock, start_time, request_counter)
@@ -58,9 +64,8 @@ def split_geometry(geometry, max_dim, scale, max_request_size, max_bands, lock, 
     width = max_x - min_x
     height = max_y - min_y
 
-    # approximate conversion from degrees to meters in U.S.
-    lat_center = (min_y + max_y) / 2  # center latitude in degrees
-    width_m = width * 111319.5 * np.cos(np.radians(lat_center))
+    # Simple conversion as you already had
+    width_m = width * 111319.5
     height_m = height * 111319.5  
 
     num_splits = 1
@@ -69,24 +74,37 @@ def split_geometry(geometry, max_dim, scale, max_request_size, max_bands, lock, 
 
     pixels_width = width_m / scale
     pixels_height = height_m / scale
-    bytes_per_pixel = max_bands * 1.2 # assuming 1 byte for 8 bit depth plus a bit of extra for metadata
+    bytes_per_pixel = max_bands * 1.2 
     while (pixels_width * pixels_height * bytes_per_pixel / (num_splits ** 2)) > max_request_size:
         num_splits *= 2
 
     if num_splits > 1:
+        # Calculate steps with small overlap to prevent gaps
         x_step = width / num_splits
         y_step = height / num_splits
-        sub_regions = [
-            [
-                min_x + i * x_step,
-                min_y + j * y_step,
-                min_x + (i + 1) * x_step,
-                min_y + (j + 1) * y_step
-            ]
-            for i in range(num_splits)
-            for j in range(num_splits)
-        ]
-        logging.info(f"Split into {len(sub_regions)} sub-regions.")
+        
+        # Add small overlap (0.5% of step size)
+        overlap = 0.005
+        x_overlap = x_step * overlap
+        y_overlap = y_step * overlap
+        
+        sub_regions = []
+        for j in range(num_splits):
+            for i in range(num_splits):
+                # Add overlap at edges except outer boundaries
+                min_x_with_overlap = min_x + i * x_step - (x_overlap if i > 0 else 0)
+                min_y_with_overlap = min_y + j * y_step - (y_overlap if j > 0 else 0)
+                max_x_with_overlap = min_x + (i + 1) * x_step + (x_overlap if i < num_splits-1 else 0)
+                max_y_with_overlap = min_y + (j + 1) * y_step + (y_overlap if j < num_splits-1 else 0)
+                
+                sub_regions.append([
+                    min_x_with_overlap,
+                    min_y_with_overlap,
+                    max_x_with_overlap, 
+                    max_y_with_overlap
+                ])
+        
+        logging.info(f"Split into {len(sub_regions)} sub-regions with 0.5% overlap.")
         return sub_regions
     else:
         return [[[min_x, min_y], [max_x, max_y]]]
