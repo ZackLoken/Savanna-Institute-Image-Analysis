@@ -64,7 +64,7 @@ def split_geometry(geometry, max_dim, scale, max_request_size, max_bands, lock, 
     width = max_x - min_x
     height = max_y - min_y
 
-    # Simple conversion as you already had
+    # Simple conversion
     width_m = width * 111319.5
     height_m = height * 111319.5  
 
@@ -72,6 +72,7 @@ def split_geometry(geometry, max_dim, scale, max_request_size, max_bands, lock, 
     while (width_m / num_splits) / scale > max_dim or (height_m / num_splits) / scale > max_dim:
         num_splits *= 2
 
+    # Calculate without overlap first to determine splits
     pixels_width = width_m / scale
     pixels_height = height_m / scale
     bytes_per_pixel = max_bands * 1.2 
@@ -79,32 +80,21 @@ def split_geometry(geometry, max_dim, scale, max_request_size, max_bands, lock, 
         num_splits *= 2
 
     if num_splits > 1:
-        # Calculate steps with small overlap to prevent gaps
         x_step = width / num_splits
         y_step = height / num_splits
         
-        # Add small overlap (0.5% of step size)
-        overlap = 0.005
-        x_overlap = x_step * overlap
-        y_overlap = y_step * overlap
-        
+        # NO overlap - simple grid
         sub_regions = []
         for j in range(num_splits):
             for i in range(num_splits):
-                # Add overlap at edges except outer boundaries
-                min_x_with_overlap = min_x + i * x_step - (x_overlap if i > 0 else 0)
-                min_y_with_overlap = min_y + j * y_step - (y_overlap if j > 0 else 0)
-                max_x_with_overlap = min_x + (i + 1) * x_step + (x_overlap if i < num_splits-1 else 0)
-                max_y_with_overlap = min_y + (j + 1) * y_step + (y_overlap if j < num_splits-1 else 0)
-                
                 sub_regions.append([
-                    min_x_with_overlap,
-                    min_y_with_overlap,
-                    max_x_with_overlap, 
-                    max_y_with_overlap
+                    min_x + i * x_step,
+                    min_y + j * y_step,
+                    min_x + (i + 1) * x_step,
+                    min_y + (j + 1) * y_step
                 ])
         
-        logging.info(f"Split into {len(sub_regions)} sub-regions with 0.5% overlap.")
+        logging.info(f"Split into {len(sub_regions)} sub-regions.")
         return sub_regions
     else:
         return [[[min_x, min_y], [max_x, max_y]]]
