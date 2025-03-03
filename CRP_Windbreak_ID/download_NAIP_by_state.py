@@ -51,7 +51,7 @@ def initialize_ee():
         logging.info("Earth Engine initialized successfully")
     except Exception as e:
         logging.error(f"Earth Engine initialization failed: {e}")
-        raise e  # Re-raise to ensure the error is handled properly
+        raise e  
 
 def split_geometry(geometry, max_dim, scale, max_request_size, max_bands, lock, start_time, request_counter):
     check_quota(lock, start_time, request_counter)
@@ -64,44 +64,47 @@ def split_geometry(geometry, max_dim, scale, max_request_size, max_bands, lock, 
     width = max_x - min_x
     height = max_y - min_y
 
-    # approximate conversion from degrees to meters in U.S.
-    lat_center = (min_y + max_y) / 2  # center latitude in degrees
+    lat_center = (min_y + max_y) / 2
     width_m = width * 111319.5 * np.cos(np.radians(lat_center))
-    height_m = height * 111319.5  
+    height_m = height * 111319.5
+
+    south_factor = np.cos(np.radians(lat_center)) / np.cos(np.radians(min_y))
+    north_factor = np.cos(np.radians(lat_center)) / np.cos(np.radians(max_y))
+    max_factor = max(south_factor, north_factor, 1.0)
+    
+    width_m_adjusted = width_m * max_factor
 
     num_splits = 1
-    while (width_m / num_splits) / scale > max_dim or (height_m / num_splits) / scale > max_dim:
+    while (width_m_adjusted / num_splits) / scale > max_dim or (height_m / num_splits) / scale > max_dim:
         num_splits *= 2
 
-    pixels_width = width_m / scale
+    pixels_width = width_m_adjusted / scale
     pixels_height = height_m / scale
-    bytes_per_pixel = max_bands * 1.2 # assuming 1 byte for 8 bit depth plus a bit of extra for metadata
+    bytes_per_pixel = max_bands * 1.75  
+    
     while (pixels_width * pixels_height * bytes_per_pixel / (num_splits ** 2)) > max_request_size:
         num_splits *= 2
 
     if num_splits > 1:
-        # Calculate step sizes in degrees
         y_step = height / num_splits
-        
-        # Create grid with proper latitude adjustment
         sub_regions = []
+        
         for j in range(num_splits):
             row_min_y = min_y + j * y_step
             row_max_y = min_y + (j + 1) * y_step
             
-            # Calculate x_step for this specific latitude band
             row_center_lat = (row_min_y + row_max_y) / 2
-            # Adjust longitude step size based on this row's latitude
             lon_correction = np.cos(np.radians(lat_center)) / np.cos(np.radians(row_center_lat))
             x_step = (width / num_splits) * lon_correction
             
             for i in range(num_splits):
-                # CRITICAL FIX: Actually use the corrected x_step value!
                 min_x_at_lat = min_x + i * x_step
+                max_x_at_lat = min_x + (i + 1) * x_step
+                
                 sub_regions.append([
                     min_x_at_lat,
                     row_min_y,
-                    min_x_at_lat + x_step, 
+                    max_x_at_lat,
                     row_max_y
                 ])
         
