@@ -1,2 +1,2 @@
-# Savanna-Institute
- GitHub Repositoy storing code for Savanna Institute image analysis projects.
+# Savanna-Institute-Image-Analysis
+ Code for Savanna Institute image analysis projects.
