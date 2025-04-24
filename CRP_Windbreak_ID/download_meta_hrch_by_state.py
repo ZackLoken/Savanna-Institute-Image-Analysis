@@ -54,6 +54,10 @@ def initialize_ee():
         raise e  # Re-raise to ensure the error is handled properly
 
 def split_geometry(geometry, max_dim, scale, max_request_size, max_bands, lock, start_time, request_counter):
+    """
+    New approach: create a uniform tiling over the bounding box and recursively subdivide any tile 
+    whose estimated download size is larger than max_request_size.
+    """
     check_quota(lock, start_time, request_counter)
     bbox = geometry.bounds().getInfo()['coordinates'][0]
     with lock:
@@ -61,57 +65,58 @@ def split_geometry(geometry, max_dim, scale, max_request_size, max_bands, lock, 
 
     min_x, min_y = bbox[0]
     max_x, max_y = bbox[2]
-    width = max_x - min_x
-    height = max_y - min_y
-
-    lat_center = (min_y + max_y) / 2
-    width_m = width * 111319.5 * np.cos(np.radians(lat_center))
-    height_m = height * 111319.5
-
-    south_factor = np.cos(np.radians(lat_center)) / np.cos(np.radians(min_y))
-    north_factor = np.cos(np.radians(lat_center)) / np.cos(np.radians(max_y))
-    max_factor = max(south_factor, north_factor, 1.0)
     
-    width_m_adjusted = width_m * max_factor
+    # Inner helper: estimate tile request size (in bytes)
+    def estimate_tile_request_size(tile):
+        # tile: [min_x, min_y, max_x, max_y]
+        t_minx, t_miny, t_maxx, t_maxy = tile
+        width = t_maxx - t_minx
+        height = t_maxy - t_miny
+        lat_center = (t_miny + t_maxy) / 2
+        width_m = width * 111319.5 * np.cos(np.radians(lat_center))
+        height_m = height * 111319.5
+        pixels_width = width_m / scale
+        pixels_height = height_m / scale
+        bytes_per_pixel = max_bands * 1.25
+        return pixels_width * pixels_height * bytes_per_pixel
 
-    num_splits = 1
-    while (width_m_adjusted / num_splits) / scale > max_dim or (height_m / num_splits) / scale > max_dim:
-        num_splits *= 2
+    # Inner helper: recursively subdivide tile if too large.
+    def recursively_split_tile(tile):
+        size = estimate_tile_request_size(tile)
+        # Calculate pixel dimensions for the tile:
+        t_minx, t_miny, t_maxx, t_maxy = tile
+        width = t_maxx - t_minx
+        height = t_maxy - t_miny
+        lat_center = (t_miny + t_maxy) / 2
+        width_m = width * 111319.5 * np.cos(np.radians(lat_center))
+        height_m = height * 111319.5
+        pixels_width = width_m / scale
+        pixels_height = height_m / scale
 
-    pixels_width = width_m_adjusted / scale
-    pixels_height = height_m / scale
-    bytes_per_pixel = max_bands * 1.25  
-    
-    while (pixels_width * pixels_height * bytes_per_pixel / (num_splits ** 2)) > max_request_size:
-        num_splits *= 2
+        # Only accept the tile if both size and pixel dimensions are within limits.
+        if size <= max_request_size and pixels_width <= max_dim and pixels_height <= max_dim:
+            return [tile]
+        # If tile is too small to split further, return it anyway.
+        if (t_maxx - t_minx) < 0.0001 or (t_maxy - t_miny) < 0.0001:
+            return [tile]
+        midx = (t_minx + t_maxx) / 2
+        midy = (t_miny + t_maxy) / 2
+        quadrants = [
+            [t_minx, t_miny, midx, midy],
+            [midx, t_miny, t_maxx, midy],
+            [t_minx, midy, midx, t_maxy],
+            [midx, midy, t_maxx, t_maxy]
+        ]
+        results = []
+        for quad in quadrants:
+            results.extend(recursively_split_tile(quad))
+        return results
 
-    if num_splits > 1:
-        y_step = height / num_splits
-        sub_regions = []
-        
-        for j in range(num_splits):
-            row_min_y = min_y + j * y_step
-            row_max_y = min_y + (j + 1) * y_step
-            
-            row_center_lat = (row_min_y + row_max_y) / 2
-            lon_correction = np.cos(np.radians(lat_center)) / np.cos(np.radians(row_center_lat))
-            x_step = (width / num_splits) * lon_correction
-            
-            for i in range(num_splits):
-                min_x_at_lat = min_x + i * x_step
-                max_x_at_lat = min_x + (i + 1) * x_step
-                
-                sub_regions.append([
-                    min_x_at_lat,
-                    row_min_y,
-                    max_x_at_lat,
-                    row_max_y
-                ])
-        
-        logging.info(f"Split into {len(sub_regions)} sub-regions with latitude correction.")
-        return sub_regions
-    else:
-        return [[[min_x, min_y], [max_x, max_y]]]
+    # Start with the full bounding box as a single tile then subdivide
+    initial_tile = [min_x, min_y, max_x, max_y]
+    sub_regions = recursively_split_tile(initial_tile)
+    logging.info(f"Split into {len(sub_regions)} sub-regions via recursive subdivision.")
+    return sub_regions
 
 def getRequests(state_name: str, batch_size: int = 10, retries: int = 3, delay: int = 5, lock=None, start_time=None, request_counter=None):
     try:
