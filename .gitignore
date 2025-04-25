@@ -12,3 +12,4 @@ Drone-based_Chestnut_Detection/Lotus_example/roi_image_order.json
 /Drone-based_Chestnut_Detection/Tensorboard_runs
 /Drone-based_Chestnut_Detection/runs
 Drone-based_Chestnut_Detection/orchard_summary.txt
+*.whl
