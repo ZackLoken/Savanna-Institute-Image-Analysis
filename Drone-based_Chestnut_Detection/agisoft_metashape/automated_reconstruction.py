@@ -4,9 +4,9 @@ import sys
 import ast
 import datetime
 
-RU = 12
-PA = 4
-RE = 0.5
+RU = 20
+PA = 6
+RE = 0.8
 
 def find_files(folder, valid_types):
     try:
@@ -62,7 +62,7 @@ def grad_selection_RU(chunk, RU_thrsh, num_tries=4, pct_del=10, thrsh_incr=1):
         npoints = len(points)
         while True:
             n += 1
-            if n > num_tries or init_thrsh <= target_thrsh or (100 * ((points_start_num - npoints) / points_start_num)) >= 50:
+            if n > num_tries or init_thrsh <= target_thrsh or (100 * ((points_start_num - npoints) / points_start_num)) >= 30:
                 break
             else:
                 points = chunk.tie_points.points
@@ -291,17 +291,18 @@ def main():
             try:
                 # Gradual tie point filtering
                 RU_thrsh = RU
-                PA_thrsh = PA
+                # PA_thrsh = PA
                 RE_thrsh = RE 
                 
                 print("Performing gradual selection by Reconstruction Uncertainty.")
-                grad_selection_RU(chunk, RU_thrsh)
+                grad_selection_RU(chunk, RU_thrsh, pct_del=5)
                 
-                print(f"Performing gradual selection using Projection Accuracy with threshold {PA_thrsh}.")
-                grad_selection_PA(chunk, PA_thrsh)
+                # # Sometimes PA filtering is too much for tree canopies. 
+                # print(f"Performing gradual selection using Projection Accuracy with threshold {PA_thrsh}.")
+                # grad_selection_PA(chunk, PA_thrsh, pct_del=5)
                 
                 print(f"Performing gradual selection using Reprojection Error with threshold {RE_thrsh}.")
-                grad_selection_RE(chunk, RE_thrsh)
+                grad_selection_RE(chunk, RE_thrsh, pct_del=5)
                 doc.save()
             except Exception as e:
                 print(f"Error during tie point filtering for folder {folder}: {e}")
