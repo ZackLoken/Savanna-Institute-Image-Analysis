@@ -18,8 +18,18 @@ def find_files(folder, valid_types):
         print(f"Error scanning folder {folder}: {e}")
         return []
 
-# gradual point selection using reconstruction uncertainty
 def grad_selection_RU(chunk, RU_thrsh, num_tries=4, pct_del=10, thrsh_incr=1):
+    """
+    Gradual selection of tie points based on reconstruction uncertainty (RU).
+    Removes points with high reconstruction uncertainty iteratively until the desired percentage of points is removed.
+
+    Parameters:
+    chunk (Metashape.Chunk): The chunk containing the tie points.
+    RU_thrsh (float): Initial reconstruction uncertainty threshold for point selection.
+    num_tries (int): Maximum number of attempts to remove points.
+    pct_del (float): Percentage of points to be removed.
+    thrsh_incr (float): Incremental value to adjust the reconstruction uncertainty threshold.
+    """
     try:
         n = 0
         target_thrsh = 10
@@ -60,6 +70,8 @@ def grad_selection_RU(chunk, RU_thrsh, num_tries=4, pct_del=10, thrsh_incr=1):
                               fit_b1=False, fit_b2=False)
         points = chunk.tie_points.points
         npoints = len(points)
+        total_removed = nselected
+        
         while True:
             n += 1
             if n > num_tries or init_thrsh <= target_thrsh or (100 * ((points_start_num - npoints) / points_start_num)) >= 30:
@@ -84,75 +96,39 @@ def grad_selection_RU(chunk, RU_thrsh, num_tries=4, pct_del=10, thrsh_incr=1):
                     print(f"Removing {nselected} tie points at a threshold of {init_thrsh}.")
                     f.removePoints(init_thrsh)
                     init_thrsh -= thrsh_incr
-                    chunk.optimizeCameras(fit_f=True, fit_cx=True, fit_cy=True,  
-                                          fit_k1=True, fit_k2=True, fit_k3=True,  
-                                          fit_k4=False, fit_p1=False, fit_p2=False,  
-                                          fit_b1=False, fit_b2=False)
+                    total_removed += nselected
+                    
+                    if n % 2 == 0:
+                        chunk.optimizeCameras(fit_f=True, fit_cx=True, fit_cy=True,  
+                                            fit_k1=True, fit_k2=True, fit_k3=True,  
+                                            fit_k4=False, fit_p1=False, fit_p2=False,  
+                                            fit_b1=False, fit_b2=False)
                     points = chunk.tie_points.points
                     npoints = len(points)
+        
+        if total_removed > 0 and n % 2 != 0:
+            chunk.optimizeCameras(fit_f=True, fit_cx=True, fit_cy=True,  
+                                fit_k1=True, fit_k2=True, fit_k3=True,  
+                                fit_k4=False, fit_p1=False, fit_p2=False,  
+                                fit_b1=False, fit_b2=False)
     except Exception as e:
         print(f"Error during gradual selection (RU): {e}")
 
-# gradual point selection using projection accuracy
-def grad_selection_PA(chunk, PA_thrsh, num_tries=4, pct_del=10, thrsh_incr=1):
-    try:
-        n = 0
-        target_thrsh = 2
-        init_thrsh = PA_thrsh
-        points = chunk.tie_points.points
-        points_start_num = len(points)
-        npoints = len(points)
-        f = Metashape.TiePoints.Filter()
-        f.init(chunk, criterion=Metashape.TiePoints.Filter.ProjectionAccuracy)
-        f.selectPoints(init_thrsh)
-        nselected = len([1 for point in points if point.valid and point.selected])
-        pct_selected = (nselected / points_start_num) * 100
-        if init_thrsh <= target_thrsh and pct_selected <= 50:
-            print(f"Now removing {nselected} tie points (PA) at a threshold of {init_thrsh}.")
-            f.removePoints(init_thrsh)
-            chunk.optimizeCameras(fit_f=True, fit_cx=True, fit_cy=True,  
-                                  fit_k1=True, fit_k2=True, fit_k3=True,  
-                                  fit_k4=False, fit_p1=False, fit_p2=False,  
-                                  fit_b1=False, fit_b2=False)
-        else:
-            while True:
-                n += 1
-                if n > num_tries or init_thrsh <= target_thrsh or (100 * ((points_start_num - npoints) / points_start_num)) >= 50:
-                    break
-                else:
-                    points = chunk.tie_points.points
-                    npoints = len(points)
-                    f.selectPoints(init_thrsh)
-                    nselected = len([1 for point in points if point.valid and point.selected])
-                    pct_selected = (nselected / npoints) * 100
-                    while True:
-                        if pct_selected <= pct_del:
-                            init_thrsh -= thrsh_incr / 5
-                            f.selectPoints(init_thrsh)
-                            nselected = len([1 for point in points if point.valid and point.selected])
-                            pct_selected = (nselected / npoints) * 100
-                        else:
-                            break
-                    f.selectPoints(init_thrsh)
-                    nselected = len([1 for point in points if point.valid and point.selected])
-                    if nselected > 0:
-                        print(f"Removing {nselected} tie points (PA) at a threshold of {init_thrsh}.")
-                        f.removePoints(init_thrsh)
-                        init_thrsh -= thrsh_incr
-                        chunk.optimizeCameras(fit_f=True, fit_cx=True, fit_cy=True,  
-                                              fit_k1=True, fit_k2=True, fit_k3=True,  
-                                              fit_k4=False, fit_p1=False, fit_p2=False,  
-                                              fit_b1=False, fit_b2=False)
-                        points = chunk.tie_points.points
-                        npoints = len(points)
-    except Exception as e:
-        print(f"Error during gradual selection (PA): {e}")
-
-
 def grad_selection_RE(chunk, RE_thrsh, num_tries=10, pct_del=10, thrsh_incr=0.05):
+    """
+    Gradual selection of tie points based on reprojection error (RE).
+    Removes points with high reprojection error iteratively until the desired percentage of points is removed.
+
+    Parameters:
+    chunk (Metashape.Chunk): The chunk containing the tie points.
+    RE_thrsh (float): Initial reprojection error threshold for point selection.
+    num_tries (int): Maximum number of attempts to remove points.
+    pct_del (float): Percentage of points to be removed.
+    thrsh_incr (float): Incremental value to adjust the reprojection error threshold.
+    """
     try:
         n = 0
-        target_thrsh = 0.2
+        target_thrsh = 0.3
         init_thrsh = RE_thrsh
         points = chunk.tie_points.points
         points_start_num = len(points)
@@ -162,13 +138,16 @@ def grad_selection_RE(chunk, RE_thrsh, num_tries=10, pct_del=10, thrsh_incr=0.05
         f.selectPoints(init_thrsh)
         nselected = len([1 for point in points if point.valid and point.selected])
         pct_selected = (nselected / points_start_num) * 100
+        total_removed = 0
+        
         if init_thrsh <= target_thrsh and pct_selected <= pct_del:
             print(f"Now removing {nselected} tie points (RE) at a threshold of {init_thrsh}.")
             f.removePoints(init_thrsh)
+            total_removed += nselected
             chunk.optimizeCameras(fit_f=True, fit_cx=True, fit_cy=True,  
-                                  fit_k1=True, fit_k2=True, fit_k3=True,  
-                                  fit_k4=False, fit_p1=False, fit_p2=False,  
-                                  fit_b1=False, fit_b2=False)
+                                fit_k1=True, fit_k2=True, fit_k3=True,  
+                                fit_k4=False, fit_p1=False, fit_p2=False,  
+                                fit_b1=False, fit_b2=False)
         else:
             while True:
                 n += 1
@@ -193,19 +172,40 @@ def grad_selection_RE(chunk, RE_thrsh, num_tries=10, pct_del=10, thrsh_incr=0.05
                     if nselected > 0:
                         print(f"Removing {nselected} tie points (RE) at a threshold of {init_thrsh}.")
                         f.removePoints(init_thrsh)
+                        total_removed += nselected
                         init_thrsh -= thrsh_incr
-                        chunk.optimizeCameras(fit_f=True, fit_cx=True, fit_cy=True,  
-                                              fit_k1=True, fit_k2=True, fit_k3=True,  
-                                              fit_k4=False, fit_p1=False, fit_p2=False,  
-                                              fit_b1=False, fit_b2=False)
+                        
+                        if n % 2 == 0:
+                            chunk.optimizeCameras(fit_f=True, fit_cx=True, fit_cy=True,  
+                                                fit_k1=True, fit_k2=True, fit_k3=True,  
+                                                fit_k4=False, fit_p1=False, fit_p2=False,  
+                                                fit_b1=False, fit_b2=False)
                         points = chunk.tie_points.points
                         npoints = len(points)
+        
+        if total_removed > 0 and n % 2 != 0:
+            chunk.optimizeCameras(fit_f=True, fit_cx=True, fit_cy=True,  
+                                fit_k1=True, fit_k2=True, fit_k3=True,  
+                                fit_k4=False, fit_p1=False, fit_p2=False,  
+                                fit_b1=False, fit_b2=False)
     except Exception as e:
         print(f"Error during gradual selection (RE): {e}")
 
-
 def main():
-    # Parse argument (still required)
+    """
+    Main function to automate the reconstruction process of DJI Mavic 3M imagery in Agisoft Metashape.
+    This script is designed to be run from the command line with a list of folder paths containing images.
+    It processes each folder by performing the following steps:
+        1. Finds valid image files in the specified folders.
+        2. Creates a new Metashape project and adds the images to a new chunk.
+        3. Calibrates reflectance using the sun sensor.
+        4. Aligns cameras and matches photos.
+        5. Optimizes camera parameters.
+        6. Performs gradual tie point filtering based on Reconstruction Uncertainty (RU) and Reprojection Error (RE).
+        7. Builds depth maps, point cloud, DEM, model, and orthomosaic.
+        8. Exports the results (point cloud, DEM, orthomosaic, and report) to the output folder.
+        9. Saves the project file in the output folder.
+    """
     if len(sys.argv) != 2:
         print("Usage: python automated_reconsutrction.py \"['<images_folder1>', '<images_folder2>', ...]\"")
         sys.exit(1)
@@ -221,7 +221,6 @@ def main():
     folder_paths = [os.path.normpath(p) for p in folder_paths]
     valid_exts = [".JPG", ".JPEG", ".TIF", ".TIFF"]
 
-    # Process each folder in the list independently
     for folder in folder_paths:
         try:
             if not os.path.isdir(folder):
@@ -234,7 +233,6 @@ def main():
                 continue
             print(f"Processing folder: {folder} ({len(photos)} photos found).")
             
-            # Set timestamp and output folder based on the parent folder of the current folder
             current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             base_folder = os.path.dirname(os.path.normpath(folder))
             output_folder = os.path.join(base_folder, f"Outputs_{current_time}")
@@ -289,20 +287,22 @@ def main():
                 continue
             
             try:
-                # Gradual tie point filtering
-                RU_thrsh = RU
-                # PA_thrsh = PA
-                RE_thrsh = RE 
-                
                 print("Performing gradual selection by Reconstruction Uncertainty.")
+                RU_thrsh = RU
                 grad_selection_RU(chunk, RU_thrsh, pct_del=5)
                 
-                # # Sometimes PA filtering is too much for tree canopies. 
-                # print(f"Performing gradual selection using Projection Accuracy with threshold {PA_thrsh}.")
-                # grad_selection_PA(chunk, PA_thrsh, pct_del=5)
-                
                 print(f"Performing gradual selection using Reprojection Error with threshold {RE_thrsh}.")
+                RE_thrsh = RE 
                 grad_selection_RE(chunk, RE_thrsh, pct_del=5)
+                
+                # Final optimization with adaptive fitting after all filtering
+                print("Performing final camera optimization with adaptive fitting...")
+                chunk.optimizeCameras(fit_f=True, fit_cx=True, fit_cy=True,  
+                                    fit_k1=True, fit_k2=True, fit_k3=True,  
+                                    fit_k4=False, fit_p1=False, fit_p2=False,  
+                                    fit_b1=False, fit_b2=False,
+                                    adaptive_fitting=True)
+                print("Final camera optimization completed.")
                 doc.save()
             except Exception as e:
                 print(f"Error during tie point filtering for folder {folder}: {e}")
@@ -351,10 +351,10 @@ def main():
                     doc.save()
                     
                     chunk.buildOrthomosaic(surface_data=Metashape.DataSource.ModelData, 
-                                           blending_mode=Metashape.BlendingMode.MosaicBlending,
-                                           ghosting_filter=True,
+                                           blending_mode=Metashape.BlendingMode.AverageBlending,
+                                           ghosting_filter=False,
                                            fill_holes=True,
-                                           cull_faces=False,
+                                           cull_faces=True,
                                            refine_seamlines=True)
                     print("Orthomosaic finished building.")
                     doc.save()
