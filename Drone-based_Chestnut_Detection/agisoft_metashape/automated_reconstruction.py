@@ -1,12 +1,12 @@
 import Metashape
 import os
+import gc
 import sys
 import ast
 import datetime
 
-RU = 20
-PA = 6
-RE = 0.8
+RU = 30
+RE = 1.0
 
 def find_files(folder, valid_types):
     try:
@@ -198,18 +198,23 @@ def main():
     It processes each folder by performing the following steps:
         1. Finds valid image files in the specified folders.
         2. Creates a new Metashape project and adds the images to a new chunk.
-        3. Calibrates reflectance using the sun sensor.
-        4. Aligns cameras and matches photos.
-        5. Optimizes camera parameters.
-        6. Performs gradual tie point filtering based on Reconstruction Uncertainty (RU) and Reprojection Error (RE).
-        7. Builds depth maps, point cloud, DEM, model, and orthomosaic.
-        8. Exports the results (point cloud, DEM, orthomosaic, and report) to the output folder.
-        9. Saves the project file in the output folder.
+        3. Analyzes image quality and disables low-quality images.
+        4. Calibrates reflectance using the sun sensor.
+        5. Aligns cameras and matches photos.
+        6. Optimizes camera parameters.
+        7. Performs gradual tie point filtering based on Reconstruction Uncertainty (RU) and Reprojection Error (RE).
+        8. Builds depth maps, point cloud, DEM, model, and orthomosaic.
+        9. Exports the results (point cloud, DEM, orthomosaic, and report) to the output folder.
+        10. Saves the project file in the output folder.
     """
     if len(sys.argv) != 2:
         print("Usage: python automated_reconsutrction.py \"['<images_folder1>', '<images_folder2>', ...]\"")
         sys.exit(1)
     
+    # clean up gpu memory
+    gc.collect()
+    print("GPU memory cleaned up.")
+
     try:
         folder_paths = ast.literal_eval(sys.argv[1])
         if not isinstance(folder_paths, list):
@@ -251,10 +256,43 @@ def main():
             doc.save()
 
             try:
+                print("Analyzing image quality...")
+                chunk.analyzeImages()
+                doc.save()
+                
+                # Get quality estimates
+                quality_values = {}
+                for camera in chunk.cameras:
+                    if camera.meta["Image/Quality"] is not None:
+                        quality_values[camera] = float(camera.meta["Image/Quality"])
+                
+                # Filter out low-quality images
+                if quality_values:
+                    quality_threshold = 0.75 
+                    low_quality_cameras = [camera for camera, quality in quality_values.items() 
+                                        if quality < quality_threshold]
+                    
+                    if low_quality_cameras:
+                        print(f"Disabling {len(low_quality_cameras)} low-quality images (quality < {quality_threshold})...")
+                        for camera in low_quality_cameras:
+                            camera.enabled = False
+                        print(f"{len([c for c in chunk.cameras if c.enabled])} high-quality images retained.")
+                    else:
+                        print("All images passed quality check.")
+                else:
+                    print("Image quality analysis did not return results. Proceeding with all images.")
+                doc.save()
+            except Exception as e:
+                print(f"Error during image quality analysis for folder {folder}: {e}")
+
+            try:
                 # calibrate reflectance using sun sensor only
-                chunk.calibrateReflectance(use_reflectance_panels=False,
-                                           use_sun_sensor=True)
-                print("Reflectance calibrated.")
+                if any(camera.enabled and "SunSensor/Irradiance" in camera.meta for camera in chunk.cameras):
+                    chunk.calibrateReflectance(use_reflectance_panels=False,
+                                            use_sun_sensor=True)
+                    print("Reflectance calibrated using sun sensor.")
+                else:
+                    print("No sun sensor data found. Skipping reflectance calibration.")
                 doc.save()
             except Exception as e:
                 print(f"Error calibrating reflectance for folder {folder}: {e}")
@@ -265,15 +303,17 @@ def main():
                 chunk.alignCameras(adaptive_fitting=False, min_image=2)
                 print(f"{len(chunk.cameras)} cameras aligned.")
                 
-                chunk.matchPhotos(downscale=1, keypoint_limit=120000, keypoint_limit_3d=300000, 
-                                  keypoint_limit_per_mpx=2000, tiepoint_limit=80000,
-                                  generic_preselection=True, reference_preselection=True,
-                                  filter_mask=True, mask_tiepoints=True, filter_stationary_points=True,
-                                  keep_keypoints=False, reset_matches=False)
+                chunk.matchPhotos(downscale=0, keypoint_limit=240000, keypoint_limit_3d=480000, 
+                                  keypoint_limit_per_mpx=4000, tiepoint_limit=0,
+                                  generic_preselection=False, reference_preselection=True,
+                                  filter_mask=False, mask_tiepoints=True, filter_stationary_points=False,
+                                  keep_keypoints=True, reset_matches=False)
                 print(f"{len(chunk.cameras)} cameras matched.")
                 doc.save()
                 
-                chunk.alignCameras(adaptive_fitting=False, min_image=2)
+                chunk.alignCameras(adaptive_fitting=False, 
+                                    reset_alignment=False, 
+                                    min_image=2)
                 print(f"{len(chunk.cameras)} cameras re-aligned.")
                 
                 chunk.optimizeCameras(fit_f=True, fit_cx=True, fit_cy=True,  
@@ -287,13 +327,13 @@ def main():
                 continue
             
             try:
-                print("Performing gradual selection by Reconstruction Uncertainty.")
                 RU_thrsh = RU
-                grad_selection_RU(chunk, RU_thrsh, pct_del=5)
+                print(f"Performing gradual selection by Reconstruction Uncertainty with threshold {RU_thrsh}.")
+                grad_selection_RU(chunk, RU_thrsh, pct_del=3)
                 
-                print(f"Performing gradual selection using Reprojection Error with threshold {RE_thrsh}.")
                 RE_thrsh = RE 
-                grad_selection_RE(chunk, RE_thrsh, pct_del=5)
+                print(f"Performing gradual selection using Reprojection Error with threshold {RE_thrsh}.")
+                grad_selection_RE(chunk, RE_thrsh, pct_del=3)
                 
                 # Final optimization with adaptive fitting after all filtering
                 print("Performing final camera optimization with adaptive fitting...")
@@ -303,6 +343,10 @@ def main():
                                     fit_b1=False, fit_b2=False,
                                     adaptive_fitting=True)
                 print("Final camera optimization completed.")
+
+                camera_file = os.path.join(output_folder, f"{current_time}_camera_positions.txt")
+                chunk.exportCameras(camera_file, format=Metashape.CamerasFormat.CamerasFormatOPK)
+                print("Camera positions exported.")
                 doc.save()
             except Exception as e:
                 print(f"Error during tie point filtering for folder {folder}: {e}")
@@ -312,7 +356,8 @@ def main():
                 # Build depth maps
                 chunk.buildDepthMaps(downscale=1, 
                                      filter_mode=Metashape.FilterMode.MildFiltering, 
-                                     reuse_depth=True)
+                                     reuse_depth=True,
+                                     max_neighbors=24)
                 print("Depth maps finished building.")
                 doc.save()
             except Exception as e:
@@ -333,23 +378,51 @@ def main():
                     chunk.point_cloud.setConfidenceFilter(0, 255)
                     chunk.point_cloud.compactPoints()
                     print("Point cloud filtered.")
+
+                    chunk.point_cloud.filterNoise(threshold=1.5) 
+                    print("Point cloud noise filtered.")
+
                     chunk.point_cloud.classifyGroundPoints(cell_size=0.25)
                     print("Point cloud ground points classified.")
+
+                    pc_file = os.path.join(output_folder, f"{current_time}_point_cloud.las")
+                    chunk.exportPointCloud(pc_file, source_data=Metashape.DataSource.PointCloudData)
+                    print("Point cloud exported.")
                     doc.save()
                     
-                    # Build DEM, Model, and Orthomosaic
+                    # Build DTM (ground points only) 
                     chunk.buildDem(source_data=Metashape.DataSource.PointCloudData,
-                                   interpolation=Metashape.Interpolation.EnabledInterpolation)
-                    print("DEM finished building.")
+                                interpolation=Metashape.Interpolation.EnabledInterpolation,
+                                classes=[Metashape.PointClass.Ground])  # Only use ground points
+                    print("DTM (terrain model) finished building.")
+
+                    dtm_file = os.path.join(output_folder, f"{current_time}_dtm.tif")
+                    chunk.exportRaster(dtm_file, source_data=Metashape.DataSource.ElevationData)
+                    print("DTM exported.")
                     doc.save()
+
+                    # Build DSM (all points)
+                    chunk.buildDem(source_data=Metashape.DataSource.PointCloudData,
+                                interpolation=Metashape.Interpolation.EnabledInterpolation)
+                    print("DSM (surface model) finished building.")
                     
+                    dsm_file = os.path.join(output_folder, f"{current_time}_dsm.tif")
+                    chunk.exportRaster(dsm_file, source_data=Metashape.DataSource.ElevationData)
+                    print("DSM exported.")
+                    doc.save()
+                    gc.collect()
+                    
+                    # Build model from depth maps
+                    print("Building 3D mesh from depth maps...")
                     chunk.buildModel(source_data=Metashape.DataSource.DepthMapsData, 
                                      surface_type=Metashape.SurfaceType.Arbitrary, 
                                      interpolation=Metashape.Interpolation.EnabledInterpolation,
-                                     face_count=Metashape.FaceCount.HighFaceCount)
+                                     face_count=Metashape.FaceCount.HighFaceCount,
+                                     subdivide_task=True)
                     print("Mesh finished building.")
                     doc.save()
                     
+                    # Build orthomosaic from model
                     chunk.buildOrthomosaic(surface_data=Metashape.DataSource.ModelData, 
                                            blending_mode=Metashape.BlendingMode.AverageBlending,
                                            ghosting_filter=False,
@@ -357,32 +430,20 @@ def main():
                                            cull_faces=True,
                                            refine_seamlines=True)
                     print("Orthomosaic finished building.")
+                    ortho_file = os.path.join(output_folder, f"{current_time}_orthomosaic.tif")
+                    chunk.exportRaster(ortho_file, source_data=Metashape.DataSource.OrthomosaicData)
+                    print("Orthomosaic exported.")
                     doc.save()
+                    gc.collect()
             except Exception as e:
                 print(f"Error during DEM/Model/Orthomosaic building for folder {folder}: {e}")
                 continue
             
             try:
-                # Export results
-                if chunk.point_cloud:
-                    pc_file = os.path.join(output_folder, f"{current_time}_point_cloud.las")
-                    chunk.exportPointCloud(pc_file, source_data=Metashape.DataSource.PointCloudData)
-                    print("Point cloud exported.")
-                
-                if chunk.elevation:
-                    dem_file = os.path.join(output_folder, f"{current_time}_dem.tif")
-                    chunk.exportRaster(dem_file, source_data=Metashape.DataSource.ElevationData)
-                    print("DEM exported.")
-                
-                if chunk.orthomosaic:
-                    ortho_file = os.path.join(output_folder, f"{current_time}_orthomosaic.tif")
-                    chunk.exportRaster(ortho_file, source_data=Metashape.DataSource.OrthomosaicData)
-                    print("Orthomosaic exported.")
-                
+                # Export report
                 report_file = os.path.join(output_folder, f"{current_time}_report.pdf")
                 chunk.exportReport(report_file)
                 print("Report exported.")
-    
                 print(f"Processing finished for folder {folder}; results saved to {output_folder}.")
             except Exception as e:
                 print(f"Error during export for folder {folder}: {e}")
