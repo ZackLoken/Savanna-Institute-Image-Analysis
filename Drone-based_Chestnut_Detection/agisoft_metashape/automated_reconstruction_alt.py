@@ -50,8 +50,17 @@ def process_rgb_images(input_folder, output_folder, debug=True):
         print("No image files found")
         return False
     
-    # Process all images
-    for input_path in tqdm(photo_paths, desc="Preprocessing images", unit="img"):
+    # Configure tqdm to only output when 5% increments are reached
+    total_images = len(photo_paths)
+    update_frequency = max(1, total_images // 20)  # Update every 5% (20 updates for 100%)
+    
+    # Process all images with reduced output frequency
+    for i, input_path in enumerate(tqdm(photo_paths, 
+                                        desc="Preprocessing images", 
+                                        unit="img",
+                                        ncols=80,
+                                        mininterval=1.0,  # Minimum update interval in seconds
+                                        miniters=update_frequency)):  # Only update every n iterations
         filename = os.path.basename(input_path)
         output_path = os.path.join(output_folder, filename)
         
@@ -91,7 +100,6 @@ def process_rgb_images(input_folder, output_folder, debug=True):
                 
                 # First apply lens distortion correction
                 if distortion_match:
-                    print(f"Applying lens distortion correction for {filename}")
                     distortion_parts = distortion_match.group(1).split(';')
                     if len(distortion_parts) > 1:
                         dist_params = np.array([float(x) for x in distortion_parts[1].split(',')])
@@ -111,10 +119,8 @@ def process_rgb_images(input_folder, output_folder, debug=True):
                 
                 # Then apply vignetting correction with subtle correction
                 if vignette_match:
-                    print(f"Found vignetting data in {filename}. Applying vignette correction.")
                     vignette_coeffs = np.array([float(x) for x in vignette_match.group(1).split(',')])
                 else:
-                    print(f"No vignetting data found in {filename}. Applying estimated vignette correction.")
                     # Original subtle coefficients
                     base_coeffs = np.array([-0.00001, -0.000005, -0.000001, -0.0000005, -0.0000001, -0.00000005])
                     vignette_coeffs = base_coeffs * 0.7
@@ -141,15 +147,12 @@ def process_rgb_images(input_folder, output_folder, debug=True):
                 # Save the processed image
                 cv2.imwrite(output_path, img)
                 processed_count += 1
-                print(f"Successfully processed {filename}")
             else:
                 missing_params = []
                 if not center_x_match:
                     missing_params.append("CalibratedOpticalCenterX")
                 if not center_y_match:
                     missing_params.append("CalibratedOpticalCenterY")
-                
-                print(f"Missing essential parameters in {filename}: {', '.join(missing_params)}")
                 cv2.imwrite(output_path, img)  # Save original if can't process
                 
         except Exception as e:
