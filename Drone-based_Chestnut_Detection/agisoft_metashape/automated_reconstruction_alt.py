@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 import re
 from tqdm import tqdm
+import pyexiv2
 
 def enable_multi_core():
     """Configure Metashape to use only GPU device 0 (not device 1)"""
@@ -18,14 +19,17 @@ def enable_multi_core():
     devices = Metashape.app.enumGPUDevices()
     device_name = devices[0].get('name', 'GPU 0') if devices else "No GPU detected"
     
-    print(f"Multi-core processing enabled with {device_name} only")
+    print(f"Multi-core processing enabled. Using GPU {device_name} only")
 
 # Create a progress callback function
-def progress_callback(progress, message):
-    """Print progress updates during long Metashape operations"""
-    if int(progress * 100) % 5 == 0:  # Report every 5%
-        print(f"{message}: {int(progress * 100)}% complete")
-    return True  # Return True to continue processing
+def progress_callback(p):
+    elapsed = float(time.time() - start_time)
+    if p > 0:
+        # Calculate time remaining: if p% took elapsed seconds, then (100-p)% will take (elapsed/p)*(100-p) seconds
+        remaining_sec = (elapsed / p) * (100 - p)
+        print('Current task progress: {:.2f}%, estimated time left: {:.0f} seconds'.format(p, remaining_sec))
+    else:
+        print('Current task progress: {:.2f}%, estimated time left: unknown'.format(p))
 
 def find_files(folder, valid_types):
     try:
@@ -41,8 +45,9 @@ def process_rgb_images(input_folder, output_folder, debug=True):
     """Process RGB images with lens distortion and vignetting corrections using equations outlined in image processing guide for Mavic 3M"""
     os.makedirs(output_folder, exist_ok=True)
     processed_count = 0
+    failed_count = 0
     
-    # Use find_files function to get image files
+    # Get image files
     valid_exts = [".jpg", ".jpeg", ".tif", ".tiff"]
     photo_paths = find_files(input_folder, valid_exts)
     
@@ -50,116 +55,131 @@ def process_rgb_images(input_folder, output_folder, debug=True):
         print("No image files found")
         return False
     
-    # Configure tqdm to only output when 5% increments are reached
-    total_images = len(photo_paths)
-    update_frequency = max(1, total_images // 20)  # Update every 5% (20 updates for 100%)
-    
-    # Process all images with reduced output frequency
-    for i, input_path in enumerate(tqdm(photo_paths, 
-                                        desc="Preprocessing images", 
-                                        unit="img",
-                                        ncols=80,
-                                        mininterval=1.0,  # Minimum update interval in seconds
-                                        miniters=update_frequency)):  # Only update every n iterations
-        filename = os.path.basename(input_path)
-        output_path = os.path.join(output_folder, filename)
-        
-        # Load image
-        img = cv2.imread(input_path)
-        if img is None:
-            print(f"Error loading {filename}")
-            continue
+    # Process images sequentially
+    for input_path in tqdm(photo_paths, desc="Processing", unit="img", ncols=80):
+        try:
+            filename = os.path.basename(input_path)
+            output_path = os.path.join(output_folder, filename)
             
-        # Extract XMP metadata
-        with open(input_path, 'rb') as f:
-            img_bytes = f.read()
-            xmp_start = img_bytes.find(b'<x:xmpmeta')
-            xmp_end = img_bytes.find(b'</x:xmpmeta')
-            if xmp_start == -1 or xmp_end == -1:
-                print(f"No XMP metadata found in {filename}")
-                cv2.imwrite(output_path, img)  # Save original image
+            # Load image
+            img = cv2.imread(input_path)
+            if img is None:
+                print(f"Error loading {filename}")
+                failed_count += 1
                 continue
                 
-            xmp_data = img_bytes[xmp_start:xmp_end+12].decode('utf-8', errors='ignore')
+            # Extract XMP metadata
+            with open(input_path, 'rb') as f:
+                img_bytes = f.read()
+                xmp_start = img_bytes.find(b'<x:xmpmeta')
+                xmp_end = img_bytes.find(b'</x:xmpmeta')
+                
+                xmp_data = img_bytes[xmp_start:xmp_end+12].decode('utf-8', errors='ignore') if xmp_start >= 0 and xmp_end > xmp_start else ""
             
-        # Parse XMP data for DJI drone info
-        try:
-            # Extract calibration parameters
+            height, width = img.shape[:2]
+            
+            # Get parameters
             center_x_match = re.search(r'CalibratedOpticalCenterX="([^"]+)"', xmp_data)
             center_y_match = re.search(r'CalibratedOpticalCenterY="([^"]+)"', xmp_data)
             vignette_match = re.search(r'VignettingData="([^"]+)"', xmp_data)
             distortion_match = re.search(r'DewarpData="([^"]+)"', xmp_data)
             
-            # Check if essential parameters are available
-            center_x = float(center_x_match.group(1)) if center_x_match else None
-            center_y = float(center_y_match.group(1)) if center_y_match else None
+            center_x = float(center_x_match.group(1)) if center_x_match else width/2
+            center_y = float(center_y_match.group(1)) if center_y_match else height/2
             
-            # Process the image based on available parameters
-            if center_x and center_y:
-                height, width = img.shape[:2]
-                
-                # First apply lens distortion correction
-                if distortion_match:
-                    distortion_parts = distortion_match.group(1).split(';')
-                    if len(distortion_parts) > 1:
-                        dist_params = np.array([float(x) for x in distortion_parts[1].split(',')])
-                        
-                        fx, fy = dist_params[0:2]
-                        cx, cy = dist_params[2:4]
-                        k1, k2, p1, p2, k3 = dist_params[4:9]
-                        
-                        camera_matrix = np.array([
-                            [fx, 0, center_x + cx],
-                            [0, fy, center_y + cy],
-                            [0, 0, 1]
-                        ])
-                        dist_coeffs = np.array([k1, k2, p1, p2, k3])
-                        
-                        img = cv2.undistort(img, camera_matrix, dist_coeffs)
-                
-                # Then apply vignetting correction with subtle correction
-                if vignette_match:
-                    vignette_coeffs = np.array([float(x) for x in vignette_match.group(1).split(',')])
-                else:
-                    # Original subtle coefficients
-                    base_coeffs = np.array([-0.00001, -0.000005, -0.000001, -0.0000005, -0.0000001, -0.00000005])
-                    vignette_coeffs = base_coeffs * 0.7
-                
-                # Create the radius map
-                y, x = np.mgrid[0:height, 0:width]
-                r = np.sqrt((x - center_x)**2 + (y - center_y)**2)
-                max_radius = np.sqrt(width**2 + height**2) / 2  # Normalize by maximum possible radius
-                r_normalized = r / max_radius  # Normalized radius (0 to ~1)
-                
-                # Create correction factor map based on DJI formula: k[5]·r^6+k[4]·r^5+...+k[0]·r+1.0
-                correction = np.ones_like(r)
-                for i, k in enumerate(vignette_coeffs):
-                    power = i + 1  # Powers from 1 to 6
-                    correction += k * r_normalized**power
-                
-                # Apply correction - ensure it never goes below 0.8 to prevent extreme darkening
-                correction = np.clip(correction, 0.8, 1.2)
-                
-                # Apply separately to each channel
-                for c in range(img.shape[2]):
-                    img[:,:,c] = np.clip(img[:,:,c] * correction, 0, 255).astype(np.uint8)
-                
-                # Save the processed image
-                cv2.imwrite(output_path, img)
-                processed_count += 1
+            # Apply lens distortion correction
+            if distortion_match:
+                distortion_parts = distortion_match.group(1).split(';')
+                if len(distortion_parts) > 1:
+                    dist_params = np.array([float(x) for x in distortion_parts[1].split(',')])
+                    
+                    fx, fy = dist_params[0:2]
+                    cx, cy = dist_params[2:4]
+                    k1, k2, p1, p2, k3 = dist_params[4:9]
+                    
+                    camera_matrix = np.array([
+                        [fx, 0, center_x + cx],
+                        [0, fy, center_y + cy],
+                        [0, 0, 1]
+                    ])
+                    dist_coeffs = np.array([k1, k2, p1, p2, k3])
+                    
+                    img = cv2.undistort(img, camera_matrix, dist_coeffs)
+            
+            # Apply vignetting correction with original code
+            if vignette_match:
+                vignette_coeffs = np.array([float(x) for x in vignette_match.group(1).split(',')])
             else:
-                missing_params = []
-                if not center_x_match:
-                    missing_params.append("CalibratedOpticalCenterX")
-                if not center_y_match:
-                    missing_params.append("CalibratedOpticalCenterY")
-                cv2.imwrite(output_path, img)  # Save original if can't process
+                base_coeffs = np.array([-0.00001, -0.000005, -0.000001, -0.0000005, -0.0000001, -0.00000005])
+                vignette_coeffs = base_coeffs * 0.7
+            
+            # Apply correction
+            y, x = np.mgrid[0:height, 0:width]
+            r = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+            max_radius = np.sqrt(width**2 + height**2) / 2
+            r_normalized = r / max_radius
+            
+            correction = np.ones_like(r)
+            for j, k in enumerate(vignette_coeffs):
+                power = j + 1
+                correction += k * r_normalized**power
+            
+            correction = np.clip(correction, 0.8, 1.2)
+            
+            for c in range(img.shape[2]):
+                img[:,:,c] = np.clip(img[:,:,c] * correction, 0, 255).astype(np.uint8)
+            
+            # Save processed image
+            cv2.imwrite(output_path, img, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            
+            # Copy metadata
+            try:
+                source_meta = pyexiv2.Image(input_path)
+                exif_data = source_meta.read_exif()
+                xmp_data = source_meta.read_xmp()
+                iptc_data = source_meta.read_iptc()
+                source_meta.close()
                 
+                dest_meta = pyexiv2.Image(output_path)
+                dest_meta.modify_exif(exif_data)
+                dest_meta.modify_xmp(xmp_data)
+                dest_meta.modify_iptc(iptc_data)
+                dest_meta.close()
+                
+                processed_count += 1
+            except Exception as e:
+                print(f"Error copying metadata for {filename}: {e}")
+                failed_count += 1
         except Exception as e:
-            print(f"Error processing {filename}: {e}")
-            cv2.imwrite(output_path, img)  # Save original if error
-
-    print(f"Processed {processed_count} RGB images with basic corrections")
+            print(f"Error processing {os.path.basename(input_path)}: {str(e)}")
+            failed_count += 1
+    
+    # Verify a sample
+    if processed_count > 0 and debug:
+        sample_file = os.path.join(output_folder, os.path.basename(photo_paths[0]))
+        print(f"Verifying sample file: {sample_file}")
+        
+        try:
+            orig_meta = pyexiv2.Image(photo_paths[0])
+            proc_meta = pyexiv2.Image(sample_file)
+            
+            orig_exif_count = len(orig_meta.read_exif())
+            proc_exif_count = len(proc_meta.read_exif())
+            orig_xmp_count = len(orig_meta.read_xmp())
+            proc_xmp_count = len(proc_meta.read_xmp())
+            
+            print(f"Original image: {orig_exif_count} EXIF tags, {orig_xmp_count} XMP tags")
+            print(f"Processed image: {proc_exif_count} EXIF tags, {proc_xmp_count} XMP tags")
+            
+            orig_meta.close()
+            proc_meta.close()
+        except Exception as e:
+            print(f"Error verifying metadata: {e}")
+    
+    print(f"Processed {processed_count} images with corrections")
+    if failed_count > 0:
+        print(f"Failed to process {failed_count} images")
+    
     return processed_count > 0
 
 def reset_region(chunk):
@@ -170,7 +190,7 @@ def reset_region(chunk):
     """
     chunk.resetRegion()
     region_dims = chunk.region.size
-    region_dims[2] *= 3  # Expand vertical dimension to accommodate trees
+    region_dims[2] *= 3 # Increase height by 3x
     chunk.region.size = region_dims
     print("Region reset to prevent point clipping.")
     return True
@@ -240,10 +260,6 @@ def main():
     if len(sys.argv) != 2:
         print("Usage: python automated_reconstruction.py \"['<images_folder1>', '<images_folder2>', ...]\"")
         sys.exit(1)
-    
-    # clean up gpu memory
-    gc.collect()
-    print("GPU memory cleaned up.")
 
     # Enable multi-core processing and use GPU device 0
     enable_multi_core()
@@ -272,8 +288,8 @@ def main():
             print(f"Processing folder: {folder} ({len(photos)} photos found).")
             
             current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            base_folder = os.path.dirname(os.path.normpath(folder))
-            output_folder = os.path.join(base_folder, f"Outputs_{current_time}")
+            parent_folder = os.path.basename(os.path.dirname(os.path.normpath(folder)))
+            output_folder = os.path.join(os.path.dirname(folder), f"{parent_folder}_Outputs_{current_time}")
             os.makedirs(output_folder, exist_ok=True)
             
             # Preprocess images before adding to Metashape
@@ -290,7 +306,7 @@ def main():
             
             # Create and open a new Metashape document
             doc = Metashape.Document()
-            project_path = os.path.join(output_folder, f"{current_time}_project.psx")
+            project_path = os.path.join(output_folder, f"{innermost_folder}_project_{current_time}.psx")
             doc.save(project_path)
             doc.open(project_path, read_only=False, ignore_lock=True)
             
@@ -345,10 +361,10 @@ def main():
                 # Match photos
                 print("Matching photos...")
                 timer_match = time.time()
-                chunk.matchPhotos(downscale=1,
-                                keypoint_limit=80000, 
-                                keypoint_limit_3d=160000, 
-                                keypoint_limit_per_mpx=5000,
+                chunk.matchPhotos(downscale=0,
+                                keypoint_limit=120000, 
+                                keypoint_limit_3d=240000, 
+                                keypoint_limit_per_mpx=6000,
                                 tiepoint_limit=0, # no limit
                                 generic_preselection=True, 
                                 reference_preselection=True,
@@ -645,4 +661,6 @@ def main():
             continue
 
 if __name__ == '__main__':
+    gc.collect()
+    start_time = time.time()
     main()
