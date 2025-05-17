@@ -379,9 +379,6 @@ def main():
                     chunk.point_cloud.compactPoints()
                     print("Point cloud filtered.")
 
-                    chunk.point_cloud.filterNoise(threshold=1.5) 
-                    print("Point cloud noise filtered.")
-
                     chunk.point_cloud.classifyGroundPoints(cell_size=0.25)
                     print("Point cloud ground points classified.")
 
@@ -397,7 +394,11 @@ def main():
                     print("DTM (terrain model) finished building.")
 
                     dtm_file = os.path.join(output_folder, f"{current_time}_dtm.tif")
-                    chunk.exportRaster(dtm_file, source_data=Metashape.DataSource.ElevationData)
+                    compression = Metashape.ImageCompression()
+                    compression.tiff_big = True
+                    chunk.exportRaster(dtm_file, 
+                                        source_data=Metashape.DataSource.ElevationData, 
+                                        image_compression=compression)
                     print("DTM exported.")
                     doc.save()
 
@@ -407,7 +408,9 @@ def main():
                     print("DSM (surface model) finished building.")
                     
                     dsm_file = os.path.join(output_folder, f"{current_time}_dsm.tif")
-                    chunk.exportRaster(dsm_file, source_data=Metashape.DataSource.ElevationData)
+                    chunk.exportRaster(dsm_file, 
+                                        source_data=Metashape.DataSource.ElevationData,
+                                        image_compression=compression)
                     print("DSM exported.")
                     doc.save()
                     gc.collect()
@@ -431,7 +434,9 @@ def main():
                                            refine_seamlines=True)
                     print("Orthomosaic finished building.")
                     ortho_file = os.path.join(output_folder, f"{current_time}_orthomosaic.tif")
-                    chunk.exportRaster(ortho_file, source_data=Metashape.DataSource.OrthomosaicData)
+                    chunk.exportRaster(ortho_file, 
+                                        source_data=Metashape.DataSource.OrthomosaicData,
+                                        image_compression=compression)
                     print("Orthomosaic exported.")
                     doc.save()
                     gc.collect()
