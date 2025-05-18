@@ -3,7 +3,6 @@ import os
 import gc
 import sys
 import ast
-import datetime
 import time
 import cv2
 import numpy as np
@@ -20,16 +19,6 @@ def enable_multi_core():
     device_name = devices[0].get('name', 'GPU 0') if devices else "No GPU detected"
     
     print(f"Multi-core processing enabled. Using GPU {device_name} only")
-
-# Create a progress callback function
-def progress_callback(p):
-    elapsed = float(time.time() - start_time)
-    if p > 0:
-        # Calculate time remaining: if p% took elapsed seconds, then (100-p)% will take (elapsed/p)*(100-p) seconds
-        remaining_sec = (elapsed / p) * (100 - p)
-        print('Current task progress: {:.2f}%, estimated time left: {:.0f} seconds'.format(p, remaining_sec))
-    else:
-        print('Current task progress: {:.2f}%, estimated time left: unknown'.format(p))
 
 def find_files(folder, valid_types):
     try:
@@ -252,6 +241,26 @@ def adaptive_filter_reprojection_error(chunk, initial_threshold=0.3, target_perc
     f.removePoints(threshold)
     return threshold
 
+class ProgressTimer:
+    def __init__(self):
+        self.reset()
+    
+    def reset(self):
+        self.start_time = time.time()
+        self.last_printed_percentage = -5
+    
+    def update(self, p):
+        if p - self.last_printed_percentage >= 5 or p >= 100:
+            elapsed = float(time.time() - self.start_time)
+            if p > 0:
+                remaining_sec = (elapsed / p) * (100 - p)
+                print('Progress: {:.0f}%, est. time left: {:.0f} sec'.format(p, remaining_sec))
+            else:
+                print('Progress: {:.0f}%, est. time left: unknown'.format(p))
+            self.last_printed_percentage = p
+
+progress_timer = ProgressTimer()
+
 def main():
     """
     Main function to automate the reconstruction process of DJI Mavic 3M imagery in Agisoft Metashape.
@@ -287,16 +296,27 @@ def main():
                 continue
             print(f"Processing folder: {folder} ({len(photos)} photos found).")
             
-            current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             parent_folder = os.path.basename(os.path.dirname(os.path.normpath(folder)))
-            output_folder = os.path.join(os.path.dirname(folder), f"{parent_folder}_Outputs_{current_time}")
+            output_folder = os.path.join(os.path.dirname(folder), f"Outputs_{parent_folder}")
             os.makedirs(output_folder, exist_ok=True)
-            
+        
             # Preprocess images before adding to Metashape
             preprocessed_folder = os.path.join(output_folder, "Preprocessed_Images")
-            print("Preprocessing images with lens and vignette corrections...")
-            process_success = process_rgb_images(folder, preprocessed_folder)
-            
+            process_success = False
+
+            # Check if preprocessed images already exist with matching count
+            if os.path.exists(preprocessed_folder):
+                preprocessed_images = find_files(preprocessed_folder, valid_exts)
+                if len(preprocessed_images) == len(photos):
+                    print(f"Preprocessed images already exist in {preprocessed_folder}. Skipping preprocessing.")
+                    process_success = True
+                    
+            # Perform preprocessing if needed
+            if not process_success:
+                print(f"{'Reprocessing' if os.path.exists(preprocessed_folder) else 'Preprocessing'} images with lens and vignette corrections...")
+                process_success = process_rgb_images(folder, preprocessed_folder)
+
+            # Handle the result of preprocessing
             if process_success:
                 # Use preprocessed images
                 photos = find_files(preprocessed_folder, valid_exts)
@@ -306,14 +326,14 @@ def main():
             
             # Create and open a new Metashape document
             doc = Metashape.Document()
-            project_path = os.path.join(output_folder, f"{innermost_folder}_project_{current_time}.psx")
+            project_path = os.path.join(output_folder, f"project_{parent_folder}.psx")
             doc.save(project_path)
             doc.open(project_path, read_only=False, ignore_lock=True)
             
             # Create a new chunk and add preprocessed photos
             chunk = doc.addChunk()
-            chunk.addPhotos(filenames=photos, progress=progress_callback)
-            print(f"{len(chunk.cameras)} images loaded for folder {folder}.")
+            chunk.addPhotos(filenames=photos, progress=progress_timer.update)
+            print(f"{len(chunk.cameras)} images loaded from: {preprocessed_folder if process_success else folder}.")
             doc.save()
 
             # Rename photos to include parent directory
@@ -328,8 +348,7 @@ def main():
 
             try:
                 print("Analyzing image quality...")
-                chunk.analyzeImages(progress=progress_callback)
-                doc.save()
+                chunk.analyzeImages(progress=progress_timer.update)
                 
                 # Get quality estimates
                 quality_values = {}
@@ -374,13 +393,12 @@ def main():
                                 keep_keypoints=True,
                                 reset_matches=False, 
                                 guided_matching=True,
-                                progress=progress_callback)  
+                                progress=progress_timer.update)  
                 print(f"Photos matched in {round(time.time() - timer_match, 1)} seconds.")
                 
                 # Align cameras
-                chunk.alignCameras(adaptive_fitting=True, min_image=2, progress=progress_callback)
+                chunk.alignCameras(adaptive_fitting=True, min_image=2, progress=progress_timer.update)
                 print(f"{len(chunk.cameras)} cameras aligned.")
-                doc.save()
                 
                 # Reset region to prevent point clipping
                 reset_region(chunk)
@@ -392,7 +410,7 @@ def main():
                                     fit_k4=False, fit_p1=False, fit_p2=False,  
                                     fit_b1=False, fit_b2=False,
                                     tiepoint_covariance=True,
-                                    progress=progress_callback)
+                                    progress=progress_timer.update)
                 print(f"{len(chunk.cameras)} cameras optimized")
                 doc.save()
             except Exception as e:
@@ -413,7 +431,7 @@ def main():
                                     fit_k4=False, fit_p1=False, fit_p2=False,
                                     fit_b1=False, fit_b2=False,
                                     tiepoint_covariance=True,
-                                    progress=progress_callback)
+                                    progress=progress_timer.update)
                 
                 # Filter by projection accuracy
                 pa_threshold = adaptive_filter_projection_accuracy(chunk, initial_threshold=2)
@@ -422,7 +440,7 @@ def main():
                                     fit_k4=False, fit_p1=False, fit_p2=False,
                                     fit_b1=False, fit_b2=False,
                                     tiepoint_covariance=True,
-                                    progress=progress_callback)
+                                    progress=progress_timer.update)
                 
                 # Filter by reprojection error
                 re_threshold = adaptive_filter_reprojection_error(chunk, initial_threshold=0.3)
@@ -435,7 +453,7 @@ def main():
                                     fit_b1=False, fit_b2=False,
                                     adaptive_fitting=True,
                                     tiepoint_covariance=True,
-                                    progress=progress_callback)
+                                    progress=progress_timer.update)
                 
                 # Report filtering results
                 points_after = len(chunk.tie_points.points)
@@ -447,7 +465,7 @@ def main():
                 reset_region(chunk)
                 
                 # Export camera positions
-                camera_file = os.path.join(output_folder, f"{current_time}_camera_positions.txt")
+                camera_file = os.path.join(output_folder, f"{parent_folder}_camera_positions.txt")
                 chunk.exportCameras(camera_file, format=Metashape.CamerasFormat.CamerasFormatOPK)
                 print("Camera positions exported.")
                 doc.save()
@@ -462,7 +480,7 @@ def main():
                                      filter_mode=Metashape.FilterMode.MildFiltering, 
                                      reuse_depth=True,
                                      max_neighbors=24,
-                                     progress=progress_callback)
+                                     progress=progress_timer.update)
                 print("Depth maps finished building.")
                 doc.save()
             except Exception as e:
@@ -479,7 +497,7 @@ def main():
                                           point_confidence=True, 
                                           keep_depth=True,
                                           max_neighbors=100,
-                                          progress=progress_callback) 
+                                          progress=progress_timer.update) 
                     print("Point cloud finished building.")
                     
                     # Filter point cloud
@@ -495,7 +513,7 @@ def main():
                         max_angle=5.0,       
                         max_distance=0.2,    
                         max_terrain_slope=6.0,
-                        progress=progress_callback,
+                        progress=progress_timer.update,
                     )
                     print("Point cloud ground points classified.")
 
@@ -506,7 +524,7 @@ def main():
                         from_class=Metashape.PointClass.Ground,
                         distance_above=0.05,  # Minimum height
                         distance_below=0.5,    # Maximum height
-                        progress=progress_callback
+                        progress=progress_timer.update
                     )
                     print("Low vegetation classified.")
 
@@ -517,7 +535,7 @@ def main():
                         from_class=Metashape.PointClass.Ground,
                         distance_above=0.5,   
                         distance_below=2.0,   
-                        progress=progress_callback
+                        progress=progress_timer.update
                     )
                     print("Medium vegetation classified.")
 
@@ -527,7 +545,7 @@ def main():
                         source_class=[Metashape.PointClass.Created, Metashape.PointClass.Unclassified],
                         from_class=Metashape.PointClass.Ground,
                         distance_above=2.0,
-                        progress=progress_callback
+                        progress=progress_timer.update
                     )
                     print("High vegetation classified.")
 
@@ -542,8 +560,8 @@ def main():
                                 pass
 
                     # Export point cloud
-                    pc_file = os.path.join(output_folder, f"{current_time}_point_cloud.las")
-                    chunk.exportPointCloud(pc_file, source_data=Metashape.DataSource.PointCloudData, progress=progress_callback)
+                    pc_file = os.path.join(output_folder, f"{parent_folder}_point_cloud.las")
+                    chunk.exportPointCloud(pc_file, source_data=Metashape.DataSource.PointCloudData, progress=progress_timer.update)
                     print("Point cloud exported.")
                     doc.save()
                     gc.collect()
@@ -553,17 +571,17 @@ def main():
                     chunk.buildDem(source_data=Metashape.DataSource.PointCloudData,
                                 interpolation=Metashape.Interpolation.EnabledInterpolation,
                                 classes=[Metashape.PointClass.Ground],
-                                progress=progress_callback)  # Only use ground points
+                                progress=progress_timer.update)  # Only use ground points
                     print("DTM (terrain model) finished building.")
 
                     # Export DTM
-                    dtm_file = os.path.join(output_folder, f"{current_time}_dtm.tif")
+                    dtm_file = os.path.join(output_folder, f"{parent_folder}_dtm.tif")
                     compression = Metashape.ImageCompression()
                     compression.tiff_big = True
                     chunk.exportRaster(dtm_file, 
                                        source_data=Metashape.DataSource.ElevationData, 
                                        image_compression=compression,
-                                       progress=progress_callback)  
+                                       progress=progress_timer.update)  
                     print("DTM exported")
                     doc.save()
                     gc.collect()  # Memory management after large export
@@ -581,15 +599,15 @@ def main():
                     chunk.buildDem(source_data=Metashape.DataSource.PointCloudData,
                                 interpolation=Metashape.Interpolation.EnabledInterpolation,
                                 classes=non_ground_classes,
-                                progress=progress_callback)
+                                progress=progress_timer.update)
                     print("DSM (excluding ground points) finished building.")
                     
                     # Export DSM
-                    dsm_file = os.path.join(output_folder, f"{current_time}_dsm.tif")
+                    dsm_file = os.path.join(output_folder, f"{parent_folder}_dsm.tif")
                     chunk.exportRaster(dsm_file, 
                                        source_data=Metashape.DataSource.ElevationData,
                                        image_compression=compression,
-                                       progress=progress_callback)
+                                       progress=progress_timer.update)
                     print("DSM exported")
                     doc.save()
                     gc.collect()
@@ -601,7 +619,7 @@ def main():
                                     surface_type=Metashape.SurfaceType.HeightField,  
                                     interpolation=Metashape.Interpolation.EnabledInterpolation,
                                     face_count=Metashape.FaceCount.HighFaceCount,
-                                    progress=progress_callback)
+                                    progress=progress_timer.update)
                     print("Mesh built.")
                     
                     # Apply mesh improvements
@@ -621,15 +639,15 @@ def main():
                                          fill_holes=True,
                                          cull_faces=True,
                                          refine_seamlines=True,
-                                         progress=progress_callback)
+                                         progress=progress_timer.update)
                     print("Orthomosaic finished building.")
                     
                     # Export orthomosaic with tiling
-                    ortho_file = os.path.join(output_folder, f"{current_time}_orthomosaic.tif")
+                    ortho_file = os.path.join(output_folder, f"{parent_folder}_orthomosaic.tif")
                     chunk.exportRaster(ortho_file, 
                                       source_data=Metashape.DataSource.OrthomosaicData,
                                       image_compression=compression,
-                                      progress=progress_callback)
+                                      progress=progress_timer.update)
                     print("Orthomosaic exported.")
                     doc.save()
                     gc.collect()
@@ -639,7 +657,7 @@ def main():
             
             try:
                 # Export report
-                report_file = os.path.join(output_folder, f"{current_time}_report.pdf")
+                report_file = os.path.join(output_folder, f"{parent_folder}_report.pdf")
                 chunk.exportReport(report_file)
                 print("Report exported.")
                 print(f"Processing finished for folder {folder}; results saved to {output_folder}.")
@@ -662,5 +680,4 @@ def main():
 
 if __name__ == '__main__':
     gc.collect()
-    start_time = time.time()
     main()
